@@ -14,7 +14,7 @@ jobs:
     runs-on: macos-15
     steps:
       - name: Check out source
-        uses: actions/checkout@3d3c42e0c91b5f256f8c713f03f50c044a03b5d5 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Validate package manifest
         run: swift package dump-package > /dev/null
