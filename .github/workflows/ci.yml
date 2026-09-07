@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e0c91b5f256f8c713f03f50c044a03b5d5 # v7.0.1
+
+      - name: Validate package manifest
+        run: swift package dump-package > /dev/null
+
+      - name: Build for iOS Simulator
+        run: >-
+          xcodebuild build
+          -scheme Inttegro
+          -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO
+
+      - name: Test on iOS Simulator
+        shell: bash
+        run: |
+          device_id="$(xcrun simctl list devices available -j | ruby -rjson -e '
+            devices = JSON.parse(STDIN.read).fetch("devices")
+            ios = devices.select { |runtime, _| runtime.include?("iOS") }
+            phone = ios.values.flatten.find { |device| device.fetch("name").start_with?("iPhone") }
+            abort "No available iPhone Simulator found" unless phone
+            puts phone.fetch("udid")
+          ')"
+          xcodebuild test \
+            -scheme Inttegro \
+            -destination "platform=iOS Simulator,id=${device_id}" \
+            CODE_SIGNING_ALLOWED=NO
