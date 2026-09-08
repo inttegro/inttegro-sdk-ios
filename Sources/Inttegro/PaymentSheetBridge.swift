@@ -106,11 +106,13 @@ extension PaymentSheetConfiguration {
 
         let appearance = try Self.bridgeAppearance(payload["appearance"])
         let telemetry = try Self.bridgeTelemetry(payload["telemetry"])
+        let features = try Self.bridgeFeatures(payload["features"])
         try self.init(
             orderID: rawOrderID,
             returnURL: returnURL,
             appearance: appearance,
-            telemetry: telemetry
+            telemetry: telemetry,
+            features: features
         )
     }
 
@@ -156,6 +158,34 @@ extension PaymentSheetConfiguration {
             traceParent: try bridgeString(payload, key: "traceparent"),
             traceState: try bridgeString(payload, key: "tracestate")
         )
+    }
+
+    private static func bridgeFeatures(_ value: Any?) throws -> Features {
+        guard let value else { return .init() }
+        guard let payload = value as? NSDictionary else {
+            throw PaymentSheetBridgeError("features must be an object")
+        }
+        return .init(
+            showLineItems: try bridgeBoolean(payload, key: "showLineItems") ?? false,
+            showInvoiceDownload: try bridgeBoolean(payload, key: "showInvoiceDownload") ?? false,
+            showReceiptDownload: try bridgeBoolean(payload, key: "showReceiptDownload") ?? false,
+            allowPaymentMethodChange: try bridgeBoolean(
+                payload,
+                key: "allowPaymentMethodChange"
+            ) ?? true
+        )
+    }
+
+    private static func bridgeBoolean(
+        _ payload: NSDictionary,
+        key: String
+    ) throws -> Bool? {
+        guard let value = payload[key] else { return nil }
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID() else {
+            throw PaymentSheetBridgeError("features.\(key) must be a boolean")
+        }
+        return number.boolValue
     }
 
     private static func bridgeString(

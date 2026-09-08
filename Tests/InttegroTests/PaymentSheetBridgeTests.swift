@@ -19,6 +19,12 @@ struct PaymentSheetBridgeTests {
                     "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
                     "tracestate": "vendor=value",
                 ],
+                "features": [
+                    "showLineItems": true,
+                    "showInvoiceDownload": true,
+                    "showReceiptDownload": true,
+                    "allowPaymentMethodChange": false,
+                ],
             ] as NSDictionary
         )
 
@@ -32,6 +38,10 @@ struct PaymentSheetBridgeTests {
                 == "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
         )
         #expect(configuration.telemetry.traceState == "vendor=value")
+        #expect(configuration.features.showLineItems)
+        #expect(configuration.features.showInvoiceDownload)
+        #expect(configuration.features.showReceiptDownload)
+        #expect(!configuration.features.allowPaymentMethodChange)
     }
 
     @Test("Rejects malformed nested configuration")
