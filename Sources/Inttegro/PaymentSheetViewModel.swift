@@ -18,7 +18,11 @@ final class PaymentSheetViewModel: ObservableObject {
             isRefreshing: Bool,
             failure: PaymentSheetFailure?
         )
-        case completed(PaymentSheetSession, paymentID: String?)
+        case completed(
+            PaymentSheetSession,
+            paymentID: String?,
+            documents: PaymentSheetSession.Documents
+        )
         case failed(PaymentSheetFailure)
     }
 
@@ -99,7 +103,7 @@ final class PaymentSheetViewModel: ObservableObject {
             session
         case let .awaitingResult(session, _, _, _):
             session
-        case let .completed(session, _):
+        case let .completed(session, _, _):
             session
         case .loading, .failed:
             nil
@@ -107,7 +111,7 @@ final class PaymentSheetViewModel: ObservableObject {
     }
 
     var completedResult: PaymentSheetResult? {
-        guard case let .completed(_, paymentID) = state else { return nil }
+        guard case let .completed(_, paymentID, _) = state else { return nil }
         return .completed(paymentID: paymentID)
     }
 
@@ -386,8 +390,12 @@ final class PaymentSheetViewModel: ObservableObject {
         session: PaymentSheetSession
     ) -> PaymentSheetResult? {
         switch outcome {
-        case let .completed(paymentID):
-            state = .completed(session, paymentID: paymentID)
+        case let .completed(paymentID, documents):
+            state = .completed(
+                session,
+                paymentID: paymentID,
+                documents: session.documents.merging(documents)
+            )
             return nil
         case let .requiresConfirmation(challenge):
             telemetry.emit(.confirmationRequired)

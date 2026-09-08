@@ -1,6 +1,30 @@
 import Foundation
 
 public struct PaymentSheetConfiguration: Sendable, Equatable {
+    /// Optional content and actions exposed by the payment sheet.
+    public struct Features: Sendable, Equatable {
+        /// Shows the Order's line items before payment. Defaults to `false`.
+        public var showLineItems: Bool
+        /// Offers the invoice after payment succeeds. Defaults to `false`.
+        public var showInvoiceDownload: Bool
+        /// Offers the receipt after payment succeeds. Defaults to `false`.
+        public var showReceiptDownload: Bool
+        /// Lets the payer replace an attached payment method. Defaults to `true`.
+        public var allowPaymentMethodChange: Bool
+
+        public init(
+            showLineItems: Bool = false,
+            showInvoiceDownload: Bool = false,
+            showReceiptDownload: Bool = false,
+            allowPaymentMethodChange: Bool = true
+        ) {
+            self.showLineItems = showLineItems
+            self.showInvoiceDownload = showInvoiceDownload
+            self.showReceiptDownload = showReceiptDownload
+            self.allowPaymentMethodChange = allowPaymentMethodChange
+        }
+    }
+
     public struct Telemetry: Sendable, Equatable {
         public var enabled: Bool
         public var traceParent: String?
@@ -61,12 +85,15 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
     public let returnURL: URL?
     public let appearance: Appearance
     public let telemetry: Telemetry
+    /// Optional content and actions exposed by the payment sheet.
+    public let features: Features
 
     public init(
         orderID: String,
         returnURL: URL? = nil,
         appearance: Appearance = .init(),
-        telemetry: Telemetry = .init()
+        telemetry: Telemetry = .init(),
+        features: Features = .init()
     ) throws {
         let normalizedOrderID = orderID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedOrderID.isEmpty else {
@@ -114,6 +141,7 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
         self.returnURL = returnURL
         self.appearance = appearance
         self.telemetry = telemetry
+        self.features = features
     }
 }
 
@@ -179,24 +207,63 @@ public struct PaymentSheetSession: Sendable, Equatable {
         }
     }
 
+    /// A purchasable item displayed in the optional Order summary.
+    public struct LineItem: Sendable, Equatable, Identifiable {
+        public let id: String
+        public let name: String
+        public let quantity: Int?
+        public let total: Money
+
+        public init(id: String, name: String, quantity: Int? = nil, total: Money) {
+            self.id = id
+            self.name = name
+            self.quantity = quantity
+            self.total = total
+        }
+    }
+
+    /// Documents that Checkout made available after payment completed.
+    public struct Documents: Sendable, Equatable {
+        public let invoiceURL: URL?
+        public let receiptURL: URL?
+
+        public init(invoiceURL: URL? = nil, receiptURL: URL? = nil) {
+            self.invoiceURL = invoiceURL
+            self.receiptURL = receiptURL
+        }
+
+        func merging(_ newer: Documents) -> Documents {
+            .init(
+                invoiceURL: newer.invoiceURL ?? invoiceURL,
+                receiptURL: newer.receiptURL ?? receiptURL
+            )
+        }
+    }
+
     public let id: String
     public let merchant: Merchant
     public let amount: Money
     public let paymentMethods: [PaymentMethod]
     public let expiresAt: Date
+    public let lineItems: [LineItem]
+    public let documents: Documents
 
     public init(
         id: String,
         merchant: Merchant,
         amount: Money,
         paymentMethods: [PaymentMethod],
-        expiresAt: Date
+        expiresAt: Date,
+        lineItems: [LineItem] = [],
+        documents: Documents = .init()
     ) {
         self.id = id
         self.merchant = merchant
         self.amount = amount
         self.paymentMethods = paymentMethods
         self.expiresAt = expiresAt
+        self.lineItems = lineItems
+        self.documents = documents
     }
 }
 
@@ -332,7 +399,7 @@ public enum PaymentSheetExternalAction: Sendable, Equatable {
 }
 
 public enum PaymentSheetPaymentOutcome: Sendable, Equatable {
-    case completed(paymentID: String?)
+    case completed(paymentID: String?, documents: PaymentSheetSession.Documents = .init())
     case requiresConfirmation(PaymentSheetConfirmationChallenge)
     case pending(PaymentSheetExternalAction?)
 }

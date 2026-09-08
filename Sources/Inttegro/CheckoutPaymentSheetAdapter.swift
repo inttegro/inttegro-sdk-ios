@@ -140,7 +140,10 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
         }
 
         if order.status == "paid" || order.status == "completed" || order.payment?.status == "paid" {
-            return .completed(paymentID: order.payment?.id)
+            return .completed(
+                paymentID: order.payment?.id,
+                documents: order.paymentSheetDocuments
+            )
         }
         if let latestError = order.payment?.latestError {
             throw latestError.confirmationError
@@ -236,7 +239,7 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("inttegro-sdk-ios/0.1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("inttegro-sdk-ios/0.2.0", forHTTPHeaderField: "User-Agent")
         telemetry?.applyTraceContext(to: &request)
         if let idempotencyKey {
             request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
@@ -358,7 +361,71 @@ private struct CheckoutOrder: Decodable {
     }
 
     struct LineItemGroup: Decodable {
+        let lineItems: [LineItem]?
         let total: Money?
+
+        enum CodingKeys: String, CodingKey {
+            case total
+            case lineItems = "line_items"
+        }
+    }
+
+    struct LineItem: Decodable {
+        let type: String
+        let product: Product?
+        let fee: Fee?
+        let shipping: Shipping?
+
+        struct Product: Decodable {
+            let id: String
+            let name: String
+            let price: Money
+            let quantity: Int
+        }
+
+        struct Fee: Decodable {
+            let id: String
+            let label: String
+            let amount: Money
+        }
+
+        struct Shipping: Decodable {
+            let id: String
+            let label: String?
+            let fee: Money
+        }
+
+        var paymentSheetLineItem: PaymentSheetSession.LineItem? {
+            switch type {
+            case "product":
+                guard let product else { return nil }
+                return .init(
+                    id: product.id,
+                    name: product.name,
+                    quantity: product.quantity,
+                    total: .init(
+                        value: product.price.value * product.quantity,
+                        currency: product.price.currency
+                    )
+                )
+            case "fee":
+                guard let fee else { return nil }
+                return .init(
+                    id: fee.id,
+                    name: fee.label,
+                    total: .init(value: fee.amount.value, currency: fee.amount.currency)
+                )
+            case "shipping":
+                guard let shipping else { return nil }
+                return .init(
+                    id: shipping.id,
+                    name: shipping.label?.nonEmpty ?? "Shipping",
+                    total: .init(value: shipping.fee.value, currency: shipping.fee.currency)
+                )
+            default:
+                return nil
+            }
+        }
     }
 
     struct Money: Decodable {
@@ -375,9 +442,10 @@ private struct CheckoutOrder: Decodable {
         let paymentMethod: PaymentMethod?
         let nextAction: NextAction?
         let latestError: CheckoutAPIError?
+        let receipt: Document?
 
         enum CodingKeys: String, CodingKey {
-            case id, amount, status
+            case id, amount, status, receipt
             case dueAt = "due_at"
             case paymentMethodTypes = "payment_method_types"
             case paymentMethod = "payment_method"
@@ -478,6 +546,7 @@ private struct CheckoutOrder: Decodable {
 
     struct Invoice: Decodable {
         let beneficiary: Beneficiary?
+        let format: DocumentFormat?
 
         struct Beneficiary: Decodable {
             let name: String?
@@ -489,6 +558,29 @@ private struct CheckoutOrder: Decodable {
                 case supportLine = "invoice_support_line"
             }
         }
+    }
+
+    struct Document: Decodable {
+        let format: DocumentFormat?
+    }
+
+    struct DocumentFormat: Decodable {
+        let pdf: DocumentLink?
+        let receipt: DocumentLink?
+    }
+
+    struct DocumentLink: Decodable {
+        let url: String?
+    }
+
+    var paymentSheetDocuments: PaymentSheetSession.Documents {
+        .init(
+            invoiceURL: Self.httpsURL(from: invoice?.format?.pdf?.url),
+            receiptURL: Self.httpsURL(
+                from: payment?.receipt?.format?.pdf?.url
+                    ?? invoice?.format?.receipt?.url
+            )
+        )
     }
 
     var paymentSheetSession: PaymentSheetSession {
@@ -541,9 +633,18 @@ private struct CheckoutOrder: Decodable {
                 ),
                 amount: .init(value: amount.value, currency: amount.currency),
                 paymentMethods: methods,
-                expiresAt: expiry
+                expiresAt: expiry,
+                lineItems: lineItemGroup?.lineItems?.compactMap(\.paymentSheetLineItem) ?? [],
+                documents: paymentSheetDocuments
             )
         }
+    }
+
+    private static func httpsURL(from value: String?) -> URL? {
+        guard let value, let url = URL(string: value), url.scheme == "https" else {
+            return nil
+        }
+        return url
     }
 
     var confirmationChallenge: PaymentSheetConfirmationChallenge? {

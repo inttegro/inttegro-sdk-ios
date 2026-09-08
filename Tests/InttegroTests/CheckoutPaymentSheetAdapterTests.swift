@@ -64,6 +64,128 @@ struct CheckoutPaymentSheetAdapterTests {
         #expect(request.value(forHTTPHeaderField: "Authorization") == nil)
     }
 
+    @Test("Maps line items and document links from Checkout")
+    func mapsOptionalCheckoutContent() async throws {
+        let transport = StubTransport(responses: [
+            "/checkout/lookup": """
+            {
+              "order": {
+                "id": "or_test",
+                "status": "requires_payment",
+                "expires_at": "2030-01-02T03:04:05Z",
+                "line_item_group": {
+                  "line_items": [
+                    {
+                      "type": "product",
+                      "product": {
+                        "id": "li_product",
+                        "name": "Woven basket",
+                        "price": {"value": 5000, "currency": "GHS"},
+                        "quantity": 2
+                      }
+                    },
+                    {
+                      "type": "shipping",
+                      "shipping": {
+                        "id": "li_shipping",
+                        "label": "Delivery",
+                        "fee": {"value": 2500, "currency": "GHS"}
+                      }
+                    }
+                  ],
+                  "total": {"value": 12500, "currency": "GHS"}
+                },
+                "payment": {
+                  "status": "initiated",
+                  "amount": {"value": 12500, "currency": "GHS"},
+                  "payment_method_types": ["mobile_money"]
+                },
+                "invoice": {
+                  "format": {
+                    "pdf": {"url": "https://pages.inttegro.com/invoices/or_test/pdf"}
+                  },
+                  "beneficiary": {"name": "Field & Form"}
+                }
+              }
+            }
+            """,
+        ])
+
+        let session = try await makeAdapter(transport).retrieveCheckout(orderID: "or_test")
+
+        #expect(session.lineItems == [
+            .init(
+                id: "li_product",
+                name: "Woven basket",
+                quantity: 2,
+                total: .init(value: 10_000, currency: "GHS")
+            ),
+            .init(
+                id: "li_shipping",
+                name: "Delivery",
+                total: .init(value: 2_500, currency: "GHS")
+            ),
+        ])
+        #expect(
+            session.documents.invoiceURL?.absoluteString
+                == "https://pages.inttegro.com/invoices/or_test/pdf"
+        )
+        #expect(session.documents.receiptURL == nil)
+    }
+
+    @Test("Returns paid document links with the completion outcome")
+    func mapsCompletionDocuments() async throws {
+        let transport = StubTransport(responses: [
+            "/checkout/pay": """
+            {
+              "order": {
+                "id": "or_test",
+                "status": "paid",
+                "payment": {
+                  "id": "py_test",
+                  "status": "paid",
+                  "receipt": {
+                    "format": {
+                      "pdf": {"url": "https://pages.inttegro.com/invoices/or_test/receipt"}
+                    }
+                  }
+                },
+                "invoice": {
+                  "format": {
+                    "pdf": {"url": "https://pages.inttegro.com/invoices/or_test/pdf"}
+                  }
+                }
+              }
+            }
+            """,
+        ])
+        let method = PaymentSheetSession.PaymentMethod(
+            id: "pm_test",
+            kind: .mobileMoney,
+            label: "MTN Mobile Money"
+        )
+        let session = PaymentSheetSession(
+            id: "or_test",
+            merchant: .init(displayName: "Field & Form"),
+            amount: .init(value: 12_500, currency: "GHS"),
+            paymentMethods: [method],
+            expiresAt: .distantFuture
+        )
+
+        let outcome = try await makeAdapter(transport).pay(
+            session: session,
+            selection: .saved(method)
+        )
+
+        #expect(outcome == .completed(
+            paymentID: "py_test",
+            documents: .init(
+                invoiceURL: URL(string: "https://pages.inttegro.com/invoices/or_test/pdf"),
+                receiptURL: URL(string: "https://pages.inttegro.com/invoices/or_test/receipt")
+            )
+        ))
+    }
+
     @Test("Rejects attached card methods until card payments are supported")
     func rejectsAttachedCardMethod() async throws {
         let transport = StubTransport(responses: [

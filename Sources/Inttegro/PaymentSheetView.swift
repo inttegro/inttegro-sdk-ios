@@ -59,8 +59,8 @@ struct PaymentSheetView: View {
                         isRefreshing: isRefreshing,
                         failure: failure
                     )
-                case let .completed(session, _):
-                    completedView(session)
+                case let .completed(session, _, documents):
+                    completedView(session, documents: documents)
                 case let .failed(failure):
                     failureView(failure)
                 }
@@ -125,7 +125,9 @@ struct PaymentSheetView: View {
         case .completed:
             return false
         default:
-            return model.selectedMethod?.source == .new || model.savePaymentMethod
+            return model.configuration.features.showLineItems
+                || model.selectedMethod?.source == .new
+                || model.savePaymentMethod
         }
     }
 
@@ -182,6 +184,10 @@ struct PaymentSheetView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
                     merchantSummary(session)
+                    if model.configuration.features.showLineItems,
+                       !session.lineItems.isEmpty {
+                        lineItems(session)
+                    }
                     paymentMethodSection(session)
                     if let failure = model.inlineFailure {
                         inlineFailure(failure)
@@ -234,13 +240,16 @@ struct PaymentSheetView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     paymentMethodSummary(selectedMethod)
                     Text(
-                        "Use the Mobile Money account attached to this payment, "
-                            + "or change it before payment is sent."
+                        model.configuration.features.allowPaymentMethodChange
+                            ? "Use the Mobile Money account attached to this payment, "
+                                + "or change it before payment is sent."
+                            : "Use the Mobile Money account attached to this payment."
                     )
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
 
-                    if let newMethod {
+                    if model.configuration.features.allowPaymentMethodChange,
+                       let newMethod {
                         Button("Change payment method") {
                             model.selectPaymentMethod(newMethod.id)
                         }
@@ -278,6 +287,37 @@ struct PaymentSheetView: View {
                 mobileMoneyForm
             }
         }
+    }
+
+    private func lineItems(_ session: PaymentSheetSession) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Order summary")
+                .font(.headline.weight(.regular))
+            ForEach(session.lineItems) { item in
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.name)
+                            .font(.subheadline)
+                        if let quantity = item.quantity, quantity > 1 {
+                            Text("Quantity \(quantity)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer(minLength: 12)
+                    Text(item.total.formatted)
+                        .font(.subheadline.monospacedDigit())
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(
+                    item.quantity.map {
+                        "\(item.name), quantity \($0), \(item.total.formatted)"
+                    } ?? "\(item.name), \(item.total.formatted)"
+                )
+            }
+        }
+        .padding(16)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18))
     }
 
     private func paymentMethodSummary(
@@ -697,7 +737,10 @@ struct PaymentSheetView: View {
         }
     }
 
-    private func completedView(_ session: PaymentSheetSession) -> some View {
+    private func completedView(
+        _ session: PaymentSheetSession,
+        documents: PaymentSheetSession.Documents
+    ) -> some View {
         VStack(spacing: 22) {
             Spacer(minLength: 16)
             ZStack {
@@ -728,6 +771,30 @@ struct PaymentSheetView: View {
             Text("Your payment was completed successfully.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+
+            if (model.configuration.features.showInvoiceDownload
+                    && documents.invoiceURL != nil)
+                || (model.configuration.features.showReceiptDownload
+                    && documents.receiptURL != nil) {
+                VStack(spacing: 10) {
+                    if model.configuration.features.showInvoiceDownload,
+                       let invoiceURL = documents.invoiceURL {
+                        Link(destination: invoiceURL) {
+                            Label("Download invoice", systemImage: "doc.text")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    if model.configuration.features.showReceiptDownload,
+                       let receiptURL = documents.receiptURL {
+                        Link(destination: receiptURL) {
+                            Label("Download receipt", systemImage: "checkmark.seal")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+            }
 
             Spacer(minLength: 16)
 

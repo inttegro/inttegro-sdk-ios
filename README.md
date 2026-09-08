@@ -1,6 +1,6 @@
 # Inttegro SDK for iOS
 
-[API reference](https://mobile.inttegro.dev/v0.1.0/ios/documentation/inttegro/) ·
+[API reference](https://mobile.inttegro.dev/v0.2.0/ios/documentation/inttegro/) ·
 [Studio guide](https://studio.inttegro.com/mobile/ios)
 
 Inttegro's native iOS payment sheet collects payment without sending secret API
@@ -20,7 +20,7 @@ Or add Inttegro to your package manifest:
 dependencies: [
     .package(
         url: "https://github.com/zebodotdev/inttegro-sdk-ios.git",
-        from: "0.1.0"
+        from: "0.2.0"
     ),
 ]
 ```
@@ -64,6 +64,12 @@ attached payment method or newly entered mobile-money details to `/checkout/pay`
 with an idempotency key. Optional billing details describe the payer; the SDK
 does not send or change shipping details. Card and Apple Pay are not supported
 in this version and are not exposed in configuration or UI.
+
+Use `PaymentSheetConfiguration.Features` to opt into line-item presentation or
+invoice and receipt downloads on the completed sheet. Those three capabilities
+default to off. `allowPaymentMethodChange` defaults to `true`; set it to `false`
+when an attached payment method must not be replaced. Orders without an
+attached method still collect one.
 
 The native sheet supports payer-supplied mobile-money and billing-detail forms,
 plus confirmation-code request and submission. HTTPS provider redirects open

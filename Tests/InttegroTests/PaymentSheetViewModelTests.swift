@@ -154,7 +154,7 @@ struct PaymentSheetViewModelTests {
         }
         #expect(pendingAction == action)
         #expect(await model.refreshPayment() == nil)
-        guard case let .completed(completedSession, paymentID) = model.state else {
+        guard case let .completed(completedSession, paymentID, _) = model.state else {
             Issue.record("Expected the sheet to show payment completion")
             return
         }
