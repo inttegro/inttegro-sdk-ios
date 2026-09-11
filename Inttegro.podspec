@@ -6,7 +6,7 @@ Pod::Spec.new do |spec|
   spec.license = { type: 'MIT' }
   spec.author = { 'Inttegro Eng' => 'engineering@inttegro.com' }
   spec.source = {
-    git: 'https://github.com/zebodotdev/inttegro-sdk-ios.git',
+    git: 'https://github.com/inttegro/inttegro-sdk-ios.git',
     tag: "v#{spec.version}",
   }
   spec.source_files = 'Sources/Inttegro/**/*.swift'

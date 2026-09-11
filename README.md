@@ -11,7 +11,7 @@ keys through your application.
 In Xcode, choose **File → Add Package Dependencies** and enter:
 
 ```text
-https://github.com/zebodotdev/inttegro-sdk-ios.git
+https://github.com/inttegro/inttegro-sdk-ios.git
 ```
 
 Or add Inttegro to your package manifest:
@@ -19,7 +19,7 @@ Or add Inttegro to your package manifest:
 ```swift
 dependencies: [
     .package(
-        url: "https://github.com/zebodotdev/inttegro-sdk-ios.git",
+        url: "https://github.com/inttegro/inttegro-sdk-ios.git",
         from: "0.2.0"
     ),
 ]
