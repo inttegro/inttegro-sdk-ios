@@ -3,8 +3,8 @@
 [API reference](https://mobile.inttegro.dev/v0.2.0/ios/documentation/inttegro/) ·
 [Studio guide](https://studio.inttegro.com/mobile/ios)
 
-Present native GHS checkout and collect Ghana Mobile Money payments without
-sending secret Inttegro API keys through your iOS application.
+Present native Inttegro Checkout without sending secret API keys through your
+iOS application.
 
 ## Install
 
