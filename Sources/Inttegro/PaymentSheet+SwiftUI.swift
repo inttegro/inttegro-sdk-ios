@@ -4,6 +4,11 @@ import SwiftUI
 ///
 /// Pass the public Checkout Order ID created by your backend. Never embed an
 /// Inttegro merchant API key in an iOS application.
+///
+/// Use this view when your application owns sheet presentation. For a concise
+/// binding-based API, apply
+/// ``inttegroPaymentSheet(isPresented:configuration:telemetryEventHandler:onCompletion:)``
+/// to the presenting view instead.
 @MainActor
 public struct InttegroPaymentSheet: View {
     @StateObject private var model: PaymentSheetViewModel
@@ -12,6 +17,12 @@ public struct InttegroPaymentSheet: View {
     @State private var telemetry: PaymentSheetTelemetry
     private let onCompletion: (PaymentSheetResult) -> Void
 
+    /// Creates Checkout-backed payment content for a SwiftUI sheet.
+    ///
+    /// - Parameters:
+    ///   - configuration: Validated Checkout and presentation options.
+    ///   - telemetryEventHandler: Optional host-owned diagnostic receiver.
+    ///   - onCompletion: Called once with the terminal presentation result.
     public init(
         configuration: PaymentSheetConfiguration,
         telemetryEventHandler: PaymentSheetTelemetry.EventHandler? = nil,
@@ -32,8 +43,17 @@ public struct InttegroPaymentSheet: View {
         self.onCompletion = onCompletion
     }
 
-    /// This initializer supports separately supplied transports for testing
-    /// and custom API environments.
+    /// Creates payment content with an application-supplied adapter.
+    ///
+    /// This initializer supports deterministic previews, tests, and controlled
+    /// API environments. Production adapters must preserve the public Checkout
+    /// security boundary and must not trust client-supplied commercial terms.
+    ///
+    /// - Parameters:
+    ///   - configuration: Validated Checkout and presentation options.
+    ///   - adapter: Transport and operations used by the payment state machine.
+    ///   - telemetry: Optional shared diagnostic source.
+    ///   - onCompletion: Called once with the terminal presentation result.
     public init(
         configuration: PaymentSheetConfiguration,
         adapter: any PaymentSheetAdapter,
@@ -83,6 +103,17 @@ public struct InttegroPaymentSheet: View {
 
 public extension View {
     /// Presents Inttegro using the system sheet appropriate for iPhone or iPad.
+    ///
+    /// The payment sheet manages its native detents and drag indicator. This
+    /// modifier resets `isPresented` before invoking `onCompletion`, so the
+    /// host can safely update navigation or present its own success UI from
+    /// the callback.
+    ///
+    /// - Parameters:
+    ///   - isPresented: Binding that controls native sheet presentation.
+    ///   - configuration: Validated Checkout and presentation options.
+    ///   - telemetryEventHandler: Optional host-owned diagnostic receiver.
+    ///   - onCompletion: Called once with the terminal presentation result.
     func inttegroPaymentSheet(
         isPresented: Binding<Bool>,
         configuration: PaymentSheetConfiguration,
@@ -97,8 +128,6 @@ public extension View {
                 isPresented.wrappedValue = false
                 onCompletion(result)
             }
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
         }
     }
 }

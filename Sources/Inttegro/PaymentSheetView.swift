@@ -2,11 +2,16 @@ import SafariServices
 import SwiftUI
 
 struct PaymentSheetView: View {
+    private static let accountEntryDetent = PresentationDetent.fraction(0.72)
+    private static let providerSelectionDetent = PresentationDetent.fraction(0.88)
+
     private enum InputField: Hashable {
+        case amount
         case accountNumber
         case billingName
         case billingPhone
         case billingLine1
+        case billingLine2
         case billingCity
         case billingRegion
         case billingPostCode
@@ -15,8 +20,11 @@ struct PaymentSheetView: View {
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @FocusState private var focusedField: InputField?
+    @State private var amountSuggestionsExpanded = false
+    @State private var lineItemsExpanded = false
+    @State private var isKeyboardPresented = false
     @State private var redirectDestination: RedirectDestination?
-    @State private var selectedDetent: PresentationDetent = .medium
+    @State private var selectedDetent: PresentationDetent = Self.accountEntryDetent
     @ObservedObject var model: PaymentSheetViewModel
     let onResult: (PaymentSheetResult) -> Void
 
@@ -41,6 +49,12 @@ struct PaymentSheetView: View {
                 switch model.state {
                 case .loading:
                     loadingView
+                case let .amountSelection(selection, isProcessing, failure):
+                    amountSelectionView(
+                        selection,
+                        isProcessing: isProcessing,
+                        failure: failure
+                    )
                 case let .ready(session):
                     checkoutView(session: session, isProcessing: false)
                 case let .processing(session):
@@ -84,9 +98,21 @@ struct PaymentSheetView: View {
                     .accessibilityLabel("Close payment sheet")
                 }
             }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                poweredByFooter
+            }
         }
         .tint(primaryColor)
-        .presentationDetents([.medium, .large], selection: $selectedDetent)
+        .presentationDetents(
+            [
+                .medium,
+                Self.accountEntryDetent,
+                Self.providerSelectionDetent,
+                .large,
+            ],
+            selection: $selectedDetent
+        )
+        .presentationDragIndicator(.visible)
         .interactiveDismissDisabled(model.isProcessing || model.completedResult != nil)
         .animation(reduceMotion ? nil : .snappy(duration: 0.24), value: model.state)
         .task {
@@ -105,12 +131,26 @@ struct PaymentSheetView: View {
                 try? await Task.sleep(for: .seconds(4))
             }
         }
-        .onChange(of: prefersLargeDetent) { shouldExpand in
-            selectedDetent = shouldExpand ? .large : .medium
+        .onChange(of: preferredDetent) { detent in
+            selectedDetent = detent
+        }
+        .onChange(of: model.isAwaitingResult) { isAwaitingResult in
+            guard isAwaitingResult else { return }
+            focusedField = nil
         }
         .onChange(of: model.networkSuggestionHint) { hint in
             guard UIAccessibility.isVoiceOverRunning, let hint else { return }
             UIAccessibility.post(notification: .announcement, argument: hint)
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)
+        ) { _ in
+            isKeyboardPresented = true
+        }
+        .onReceive(
+            NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)
+        ) { _ in
+            isKeyboardPresented = false
         }
         .fullScreenCover(item: $redirectDestination) { destination in
             SafariView(url: destination.url)
@@ -118,16 +158,28 @@ struct PaymentSheetView: View {
         }
     }
 
-    private var prefersLargeDetent: Bool {
+    private var preferredDetent: PresentationDetent {
         switch model.state {
-        case .confirmation, .awaitingResult:
-            return true
-        case .completed:
-            return false
+        case .amountSelection:
+            return amountSuggestionsExpanded
+                ? Self.providerSelectionDetent
+                : .medium
+        case .confirmation:
+            return .large
+        case .awaitingResult, .completed:
+            return .medium
         default:
-            return model.configuration.features.showLineItems
-                || model.selectedMethod?.source == .new
+            if lineItemsExpanded
                 || model.savePaymentMethod
+                || isKeyboardPresented {
+                return .large
+            }
+            if model.selectedMethod?.source == .saved {
+                return .medium
+            }
+            return model.networkSelectorRevealed
+                ? Self.providerSelectionDetent
+                : Self.accountEntryDetent
         }
     }
 
@@ -140,6 +192,28 @@ struct PaymentSheetView: View {
             }
         }
         .ignoresSafeArea()
+    }
+
+    private var poweredByFooter: some View {
+        HStack(spacing: 14) {
+            Text("Powered by Inttegro")
+            Button("Terms") {
+                if let url = URL(string: "https://inttegro.com/terms") {
+                    redirectDestination = RedirectDestination(url: url)
+                }
+            }
+            Button("Privacy") {
+                if let url = URL(string: "https://inttegro.com/privacy") {
+                    redirectDestination = RedirectDestination(url: url)
+                }
+            }
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .buttonStyle(.plain)
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .padding(.bottom, 4)
+        .background(sheetBackground)
     }
 
     private var loadingView: some View {
@@ -155,6 +229,196 @@ struct PaymentSheetView: View {
         }
         .padding(32)
         .accessibilityElement(children: .combine)
+    }
+
+    private func amountSelectionView(
+        _ selection: PaymentSheetAmountSelection,
+        isProcessing: Bool,
+        failure: PaymentSheetFailure?
+    ) -> some View {
+        let fractionDigits = amountFractionDigits(for: selection.currency)
+        let scale = amountScale(for: selection.currency)
+        let amountBinding = Binding<Double>(
+            get: { Double(model.selectedAmountValue) / scale },
+            set: { model.chooseAmount(Int(($0 * scale).rounded())) }
+        )
+
+        return ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Choose how much to pay.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 10) {
+                        Text(selection.currency)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                        TextField(
+                            "0.00",
+                            value: amountBinding,
+                            format: .number.precision(.fractionLength(fractionDigits))
+                        )
+                            .keyboardType(.decimalPad)
+                            .font(.title.monospacedDigit())
+                            .focused($focusedField, equals: .amount)
+                            .accessibilityLabel("Amount")
+                    }
+                    .padding(.horizontal, 16)
+                    .frame(minHeight: 72)
+                    .background(.background, in: RoundedRectangle(cornerRadius: 14))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14)
+                            .stroke(Color(uiColor: .separator), lineWidth: 0.5)
+                    }
+                    Text(amountRangeText(selection))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                if !selection.suggestions.isEmpty {
+                    DisclosureGroup(
+                        isExpanded: $amountSuggestionsExpanded
+                    ) {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(selection.suggestions) { suggestion in
+                                    amountSuggestionButton(
+                                        suggestion,
+                                        currency: selection.currency
+                                    )
+                                }
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    } label: {
+                        Text("Suggestions")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let failure {
+                    inlineFailure(failure)
+                }
+
+                Button {
+                    Task { await model.continueWithSelectedAmount() }
+                } label: {
+                    HStack {
+                        if isProcessing { ProgressView().tint(primaryButtonForegroundColor) }
+                        Text(
+                            isProcessing
+                                ? "Preparing checkout…"
+                                : "Continue"
+                        )
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 50)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(primaryColor)
+                .foregroundStyle(primaryButtonForegroundColor)
+                .disabled(!model.canSelectAmount || isProcessing)
+                .accessibilityLabel(
+                    isProcessing
+                        ? "Preparing checkout"
+                        : "Continue with \(selectedAmountText(selection))"
+                )
+            }
+            .padding(20)
+        }
+        .scrollDismissesKeyboard(.interactively)
+    }
+
+    private func amountSuggestionButton(
+        _ suggestion: PaymentSheetAmountSelection.Suggestion,
+        currency: String
+    ) -> some View {
+        let isSelected = model.selectedAmountValue == suggestion.value
+        let amount = PaymentSheetSession.Money(
+            value: suggestion.value,
+            currency: currency
+        ).formatted
+
+        return Button {
+            model.chooseAmount(suggestion.value)
+        } label: {
+            VStack(spacing: 3) {
+                HStack(spacing: 5) {
+                    if isSelected {
+                        Image(systemName: "checkmark")
+                            .font(.caption2.weight(.semibold))
+                    }
+                    Text(amount)
+                        .font(.subheadline)
+                        .monospacedDigit()
+                }
+                if suggestion.recommended {
+                    Text("Recommended")
+                        .font(.caption2)
+                        .opacity(isSelected ? 0.72 : 1)
+                }
+            }
+            .padding(.horizontal, 12)
+            .frame(minHeight: 48)
+            .foregroundStyle(isSelected ? primaryButtonForegroundColor : textColor)
+            .background(
+                isSelected
+                    ? primaryColor
+                    : Color(uiColor: .secondarySystemGroupedBackground),
+                in: RoundedRectangle(cornerRadius: 10)
+            )
+            .overlay {
+                if !isSelected {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color(uiColor: .separator), lineWidth: 0.5)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(
+            suggestion.recommended ? "\(amount), recommended" : amount
+        )
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
+    }
+
+    private func selectedAmountText(_ selection: PaymentSheetAmountSelection) -> String {
+        PaymentSheetSession.Money(
+            value: model.selectedAmountValue,
+            currency: selection.currency
+        ).formatted
+    }
+
+    private func amountRangeText(_ selection: PaymentSheetAmountSelection) -> String {
+        let minimum = PaymentSheetSession.Money(
+            value: selection.minimum,
+            currency: selection.currency
+        ).formatted
+        guard let maximum = selection.maximum else {
+            return "Minimum \(minimum)"
+        }
+        let maximumText = amountNumberText(maximum, currency: selection.currency)
+        return "\(minimum)–\(maximumText)"
+    }
+
+    private func amountNumberText(_ value: Int, currency: String) -> String {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = amountFractionDigits(for: currency)
+        formatter.maximumFractionDigits = formatter.minimumFractionDigits
+        let decimal = Decimal(value) / Decimal(amountScale(for: currency))
+        return formatter.string(from: decimal as NSDecimalNumber) ?? "\(decimal)"
+    }
+
+    private func amountScale(for currency: String) -> Double {
+        pow(10, Double(amountFractionDigits(for: currency)))
+    }
+
+    private func amountFractionDigits(for currency: String) -> Int {
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .currency
+        formatter.currencyCode = currency
+        return formatter.maximumFractionDigits
     }
 
     private func failureView(_ failure: PaymentSheetFailure) -> some View {
@@ -180,30 +444,44 @@ struct PaymentSheetView: View {
         session: PaymentSheetSession,
         isProcessing: Bool
     ) -> some View {
-        VStack(spacing: 0) {
+        let usesCompactPresentation = model.configuration.features.showLineItems
+            && !lineItemsExpanded
+            && !model.configuration.features.allowPaymentMethodChange
+            && model.selectedMethod?.source == .saved
+
+        return VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
+                VStack(
+                    alignment: .leading,
+                    spacing: usesCompactPresentation ? 12 : 18
+                ) {
                     merchantSummary(session)
-                    if model.configuration.features.showLineItems,
-                       !session.lineItems.isEmpty {
-                        lineItems(session)
+                    if !session.lineItems.isEmpty,
+                       model.configuration.features.showLineItems
+                        || session.lineItems.contains(where: { $0.amountSelection != nil }) {
+                        lineItems(session, isProcessing: isProcessing)
                     }
-                    paymentMethodSection(session)
+                    paymentMethodSection(
+                        session,
+                        showTitle: !usesCompactPresentation
+                    )
                     if let failure = model.inlineFailure {
                         inlineFailure(failure)
                     }
-                    paymentConsent(session)
                 }
                 .padding(.horizontal, 20)
-                .padding(.top, 18)
-                .padding(.bottom, 24)
+                .padding(.top, usesCompactPresentation ? 10 : 16)
+                .padding(.bottom, usesCompactPresentation ? 8 : 16)
             }
             .id(model.selectedPaymentMethodID)
             .scrollDismissesKeyboard(.interactively)
 
-            payButton(session, isProcessing: isProcessing)
-                .padding(.horizontal, 20)
-                .padding(.vertical, 14)
+            VStack(alignment: .leading, spacing: 10) {
+                paymentConsent
+                payButton(session, isProcessing: isProcessing)
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, usesCompactPresentation ? 10 : 12)
         }
     }
 
@@ -215,6 +493,9 @@ struct PaymentSheetView: View {
             Text(session.amount.formatted)
                 .font(.system(.largeTitle, design: .rounded, weight: .regular))
                 .contentTransition(.numericText())
+                .accessibilityLabel(
+                    "Pay \(session.amount.formatted) to \(session.merchant.displayName)"
+                )
             if let supportText = session.merchant.supportText {
                 Text(supportText)
                     .font(.footnote)
@@ -222,38 +503,37 @@ struct PaymentSheetView: View {
             }
         }
         .frame(maxWidth: .infinity)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(
-            "Pay \(session.amount.formatted) to \(session.merchant.displayName)"
-        )
     }
 
-    private func paymentMethodSection(_ session: PaymentSheetSession) -> some View {
+    private func paymentMethodSection(
+        _ session: PaymentSheetSession,
+        showTitle: Bool
+    ) -> some View {
         let attachedMethod = session.paymentMethods.first { $0.source == .saved }
         let newMethod = session.paymentMethods.first { $0.source == .new }
         return VStack(alignment: .leading, spacing: 14) {
-            Text("Pay with Mobile Money")
-                .font(.headline.weight(.regular))
+            if showTitle {
+                Text("Pay with Mobile Money")
+                    .font(.headline.weight(.regular))
+            }
 
             if let selectedMethod = model.selectedMethod,
                selectedMethod.source == .saved {
-                VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
                     paymentMethodSummary(selectedMethod)
-                    Text(
-                        model.configuration.features.allowPaymentMethodChange
-                            ? "Use the Mobile Money account attached to this payment, "
-                                + "or change it before payment is sent."
-                            : "Use the Mobile Money account attached to this payment."
-                    )
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
                     if model.configuration.features.allowPaymentMethodChange,
                        let newMethod {
-                        Button("Change payment method") {
+                        Button {
                             model.selectPaymentMethod(newMethod.id)
+                        } label: {
+                            Image(systemName: "arrow.left.arrow.right")
+                                .font(.body.weight(.regular))
+                                .foregroundStyle(primaryColor)
+                                .frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
                         }
-                        .font(.subheadline.weight(.regular))
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Change payment method")
                     }
                 }
                 .padding(16)
@@ -289,35 +569,106 @@ struct PaymentSheetView: View {
         }
     }
 
-    private func lineItems(_ session: PaymentSheetSession) -> some View {
+    private func lineItems(
+        _ session: PaymentSheetSession,
+        isProcessing: Bool
+    ) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Order summary")
-                .font(.headline.weight(.regular))
-            ForEach(session.lineItems) { item in
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Button {
+                withAnimation(reduceMotion ? nil : .snappy(duration: 0.24)) {
+                    lineItemsExpanded.toggle()
+                }
+            } label: {
+                HStack(spacing: 12) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(item.name)
-                            .font(.subheadline)
-                        if let quantity = item.quantity, quantity > 1 {
-                            Text("Quantity \(quantity)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
+                        Text("Order summary")
+                            .font(.headline.weight(.regular))
+                        Text(itemCountLabel(session.lineItems.count))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 12)
-                    Text(item.total.formatted)
-                        .font(.subheadline.monospacedDigit())
+                    Image(systemName: lineItemsExpanded ? "chevron.up" : "chevron.down")
+                        .font(.subheadline.weight(.regular))
+                        .foregroundStyle(.secondary)
                 }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel(
-                    item.quantity.map {
-                        "\(item.name), quantity \($0), \(item.total.formatted)"
-                    } ?? "\(item.name), \(item.total.formatted)"
-                )
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isProcessing)
+            .accessibilityLabel(
+                lineItemsExpanded ? "Hide order items" : "Show order items"
+            )
+            .accessibilityValue(itemCountLabel(session.lineItems.count))
+
+            if lineItemsExpanded {
+                ForEach(session.lineItems) { item in
+                    if item.amountSelection != nil {
+                        Button {
+                            amountSuggestionsExpanded = false
+                            model.editAmount(lineItemID: item.id)
+                        } label: {
+                            lineItemRow(item, amountIsEditable: true)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isProcessing)
+                        .accessibilityLabel("Change amount for \(item.name)")
+                        .accessibilityValue(item.total.formatted)
+                    } else {
+                        lineItemRow(item, amountIsEditable: false)
+                            .accessibilityElement(children: .combine)
+                            .accessibilityLabel(lineItemAccessibilityLabel(item))
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .padding(16)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private func lineItemRow(
+        _ item: PaymentSheetSession.LineItem,
+        amountIsEditable: Bool
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(item.name)
+                    .font(.subheadline)
+                if let quantity = item.quantity, quantity > 1 {
+                    Text("Quantity \(quantity)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer(minLength: 12)
+            if amountIsEditable {
+                HStack(spacing: 4) {
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2.weight(.semibold))
+                    Text(item.total.formatted)
+                        .font(.subheadline.monospacedDigit())
+                }
+                .foregroundStyle(primaryColor)
+            } else {
+                Text(item.total.formatted)
+                    .font(.subheadline.monospacedDigit())
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .contentShape(Rectangle())
+    }
+
+    private func lineItemAccessibilityLabel(
+        _ item: PaymentSheetSession.LineItem
+    ) -> String {
+        item.quantity.map {
+            "\(item.name), quantity \($0), \(item.total.formatted)"
+        } ?? "\(item.name), \(item.total.formatted)"
+    }
+
+    private func itemCountLabel(_ count: Int) -> String {
+        count == 1 ? "1 item" : "\(count) items"
     }
 
     private func paymentMethodSummary(
@@ -373,8 +724,8 @@ struct PaymentSheetView: View {
                     Text("Save for next time")
                         .font(.body.weight(.regular))
                     Text(
-                        "Use your Mobile Money account for faster payments with "
-                            + "\(model.currentSession?.merchant.displayName ?? "this merchant") next time."
+                        "Pay faster at "
+                            + "\(model.currentSession?.merchant.displayName ?? "this merchant")."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -382,59 +733,83 @@ struct PaymentSheetView: View {
             }
 
             if model.savePaymentMethod {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 16) {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("Your details")
                             .font(.headline.weight(.regular))
-                        Text(
-                            model.paymentMethodOwnerReady
-                                ? "We'll save these details with your Mobile Money account. "
-                                    + "This won't change the delivery details for this order."
-                                : "Add your name to save this Mobile Money account. "
-                                    + "This won't change the delivery details for this order."
-                        )
+                        Text("Used only to save this Mobile Money account. Delivery details stay unchanged.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     }
-                    labeledField(
-                        "Full name",
-                        text: $model.billingName,
-                        field: .billingName,
-                        contentType: .name,
-                        error: model.validationMessage(for: .billingName)
-                    )
-                    labeledField(
-                        "Phone number (optional)",
-                        text: $model.billingPhoneNumber,
-                        field: .billingPhone,
-                        contentType: .telephoneNumber,
-                        keyboardType: .phonePad
-                    )
-                    LabeledContent("Country", value: "Ghana")
-                    labeledField(
-                        "Street address (optional)",
-                        text: $model.billingLine1,
-                        field: .billingLine1,
-                        contentType: .streetAddressLine1
-                    )
-                    labeledField(
-                        "City (optional)",
-                        text: $model.billingCity,
-                        field: .billingCity,
-                        contentType: .addressCity
-                    )
-                    labeledField(
-                        "Region (optional)",
-                        text: $model.billingRegion,
-                        field: .billingRegion,
-                        contentType: .addressState
-                    )
-                    labeledField(
-                        "Postal code (optional)",
-                        text: $model.billingPostCode,
-                        field: .billingPostCode,
-                        contentType: .postalCode
-                    )
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Contact")
+                            .font(.subheadline.weight(.regular))
+                        labeledField(
+                            "Full name",
+                            text: $model.billingName,
+                            field: .billingName,
+                            contentType: .name,
+                            error: model.validationMessage(for: .billingName),
+                            isRequired: true
+                        )
+                        labeledField(
+                            "Phone number",
+                            text: $model.billingPhoneNumber,
+                            field: .billingPhone,
+                            contentType: .telephoneNumber,
+                            keyboardType: .phonePad,
+                            supportingText: "Optional"
+                        )
+                    }
+
+                    Divider()
+
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Billing address")
+                            .font(.subheadline.weight(.regular))
+                        LabeledContent("Country or region", value: "Ghana")
+                            .accessibilityElement(children: .combine)
+                        labeledField(
+                            "Street address",
+                            text: $model.billingLine1,
+                            field: .billingLine1,
+                            contentType: .streetAddressLine1,
+                            error: model.validationMessage(for: .billingLine1),
+                            isRequired: true
+                        )
+                        labeledField(
+                            "Apartment, suite, or building",
+                            text: $model.billingLine2,
+                            field: .billingLine2,
+                            contentType: .streetAddressLine2,
+                            supportingText: "Optional"
+                        )
+                        labeledField(
+                            "City",
+                            text: $model.billingCity,
+                            field: .billingCity,
+                            contentType: .addressCity,
+                            error: model.validationMessage(for: .billingCity),
+                            isRequired: true
+                        )
+                        labeledField(
+                            "Region",
+                            text: $model.billingRegion,
+                            field: .billingRegion,
+                            contentType: .addressState,
+                            error: model.validationMessage(for: .billingRegion),
+                            isRequired: true
+                        )
+                        labeledField(
+                            "Postal code",
+                            text: $model.billingPostCode,
+                            field: .billingPostCode,
+                            contentType: .postalCode,
+                            error: model.validationMessage(for: .billingPostCode),
+                            isRequired: true
+                        )
+                    }
                 }
             }
         }
@@ -608,18 +983,27 @@ struct PaymentSheetView: View {
         field: InputField,
         contentType: UITextContentType? = nil,
         keyboardType: UIKeyboardType = .default,
-        error: String? = nil
+        error: String? = nil,
+        supportingText: String? = nil,
+        isRequired: Bool = false
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label)
-                .font(.subheadline.weight(.regular))
+            HStack(alignment: .firstTextBaseline) {
+                Text(label)
+                    .font(.subheadline.weight(.regular))
+                Spacer(minLength: 8)
+                if let supportingText {
+                    Text(supportingText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             TextField("", text: text)
                 .textFieldStyle(.roundedBorder)
                 .textContentType(contentType)
                 .keyboardType(keyboardType)
                 .focused($focusedField, equals: field)
-                .autocorrectionDisabled()
-                .accessibilityLabel(label)
+                .accessibilityLabel(isRequired ? "\(label), required" : label)
                 .accessibilityHint(error ?? "")
             if let error {
                 Text(error)
@@ -684,10 +1068,23 @@ struct PaymentSheetView: View {
             )
             .padding(16)
         }
-        .onAppear {
-            if !challenge.requiresNewCode {
-                focusedField = .confirmationToken
+        .task(id: challenge) {
+            guard !challenge.requiresNewCode else {
+                focusedField = nil
+                return
             }
+
+            // Let the confirmation view and its large sheet detent settle before
+            // moving focus. Assigning focus synchronously during the state
+            // transition can leave the field selected without presenting the
+            // software keyboard.
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !Task.isCancelled,
+                  case let .confirmation(_, activeChallenge, _, _) = model.state,
+                  activeChallenge == challenge else {
+                return
+            }
+            focusedField = .confirmationToken
         }
     }
 
@@ -699,7 +1096,7 @@ struct PaymentSheetView: View {
     ) -> some View {
         VStack(spacing: 0) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 22) {
+                VStack(alignment: .leading, spacing: 14) {
                     merchantSummary(session)
                     TimelineView(.periodic(from: .now, by: 1)) { context in
                         externalActionCard(action, now: context.date)
@@ -707,12 +1104,10 @@ struct PaymentSheetView: View {
                     if let failure {
                         inlineFailure(failure)
                     }
-                    Text("Powered by Inttegro")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .center)
                 }
-                .padding(20)
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
             }
 
             Button {
@@ -741,70 +1136,97 @@ struct PaymentSheetView: View {
         _ session: PaymentSheetSession,
         documents: PaymentSheetSession.Documents
     ) -> some View {
-        VStack(spacing: 22) {
-            Spacer(minLength: 16)
-            ZStack {
-                Circle()
-                    .fill(primaryColor.opacity(0.14))
-                    .frame(width: 88, height: 88)
-                Image(systemName: "checkmark")
-                    .font(.system(size: 34, weight: .regular))
-                    .foregroundStyle(primaryColor)
-            }
-            .accessibilityHidden(true)
+        let showsInvoice = model.configuration.features.showInvoiceDownload
+            && documents.invoiceURL != nil
+        let showsReceipt = model.configuration.features.showReceiptDownload
+            && documents.receiptURL != nil
+        let showsDocuments = showsInvoice || showsReceipt
 
-            VStack(spacing: 8) {
-                Text("Payment complete")
-                    .font(.title2.weight(.regular))
-                Text(session.amount.formatted)
-                    .font(.system(.largeTitle, design: .rounded, weight: .regular))
-                    .contentTransition(.numericText())
-                Text("Paid to \(session.merchant.displayName)")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(
-                "Payment complete. Paid \(session.amount.formatted) to \(session.merchant.displayName)."
-            )
-
-            Text("Your payment was completed successfully.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-
-            if (model.configuration.features.showInvoiceDownload
-                    && documents.invoiceURL != nil)
-                || (model.configuration.features.showReceiptDownload
-                    && documents.receiptURL != nil) {
-                VStack(spacing: 10) {
-                    if model.configuration.features.showInvoiceDownload,
-                       let invoiceURL = documents.invoiceURL {
-                        Link(destination: invoiceURL) {
-                            Label("Download invoice", systemImage: "doc.text")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
+        return VStack(spacing: 0) {
+            ScrollView {
+                VStack(spacing: showsDocuments ? 8 : 12) {
+                    ZStack {
+                        Circle()
+                            .fill(primaryColor.opacity(0.14))
+                            .frame(
+                                width: showsDocuments ? 48 : 60,
+                                height: showsDocuments ? 48 : 60
+                            )
+                        Image(systemName: "checkmark")
+                            .font(
+                                .system(
+                                    size: showsDocuments ? 20 : 24,
+                                    weight: .regular
+                                )
+                            )
+                            .foregroundStyle(primaryColor)
                     }
-                    if model.configuration.features.showReceiptDownload,
-                       let receiptURL = documents.receiptURL {
-                        Link(destination: receiptURL) {
-                            Label("Download receipt", systemImage: "checkmark.seal")
-                                .frame(maxWidth: .infinity)
+                    .accessibilityHidden(true)
+
+                    VStack(spacing: showsDocuments ? 4 : 8) {
+                        Text("Payment complete")
+                            .font(
+                                showsDocuments
+                                    ? .headline.weight(.regular)
+                                    : .title3.weight(.regular)
+                            )
+                        Text(session.amount.formatted)
+                            .font(
+                                .system(
+                                    showsDocuments ? .title : .largeTitle,
+                                    design: .rounded,
+                                    weight: .regular
+                                )
+                            )
+                            .contentTransition(.numericText())
+                        Text("Paid to \(session.merchant.displayName)")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(
+                        "Payment complete. Paid \(session.amount.formatted) to \(session.merchant.displayName)."
+                    )
+
+                    if showsDocuments {
+                        VStack(spacing: 8) {
+                            if showsInvoice, let invoiceURL = documents.invoiceURL {
+                                Link(destination: invoiceURL) {
+                                    Label("Download invoice", systemImage: "doc.text")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                            if showsReceipt, let receiptURL = documents.receiptURL {
+                                Link(destination: receiptURL) {
+                                    Label("Download receipt", systemImage: "checkmark.seal")
+                                        .frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
                         }
-                        .buttonStyle(.bordered)
                     }
                 }
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 20)
+                .padding(.top, showsDocuments ? 8 : 16)
+                .padding(.bottom, showsDocuments ? 4 : 12)
             }
 
-            Spacer(minLength: 16)
-
-            Button("Done") {
+            Button {
                 if let result = model.completedResult {
                     onResult(result)
                 }
+            } label: {
+                Text("Done")
+                    .fontWeight(.regular)
+                    .foregroundColor(primaryButtonForegroundColor)
+                    .frame(maxWidth: .infinity)
+                    .frame(minHeight: 28)
             }
             .buttonStyle(.borderedProminent)
-            .foregroundStyle(primaryButtonForegroundColor)
             .buttonBorderShape(
                 .roundedRectangle(
                     radius: model.configuration.appearance.cornerRadius ?? 16
@@ -812,8 +1234,9 @@ struct PaymentSheetView: View {
             )
             .controlSize(.large)
             .frame(maxWidth: .infinity)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 14)
         }
-        .padding(20)
     }
 
     @ViewBuilder
@@ -821,7 +1244,7 @@ struct PaymentSheetView: View {
         _ action: PaymentSheetExternalAction?,
         now: Date
     ) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 10) {
             switch action {
             case let .redirect(url, expiresAt):
                 let expired = expiresAt.map { now >= $0 } ?? false
@@ -858,7 +1281,7 @@ struct PaymentSheetView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(16)
+        .padding(14)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18))
     }
 
@@ -918,12 +1341,12 @@ struct PaymentSheetView: View {
                                 : (isProcessing ? "Checking code" : "Continue")
                         )
                         .fontWeight(.regular)
+                        .foregroundColor(primaryButtonForegroundColor)
                     }
                     .frame(maxWidth: .infinity)
                     .frame(minHeight: 28)
                 }
                 .buttonStyle(.borderedProminent)
-                .foregroundStyle(primaryButtonForegroundColor)
                 .controlSize(.large)
                 .disabled(
                     isProcessing || (challenge.requiresNewCode && !canRequest)
@@ -1043,18 +1466,17 @@ struct PaymentSheetView: View {
         )
     }
 
-    private func paymentConsent(_ session: PaymentSheetSession) -> some View {
+    private var paymentConsent: some View {
         Text(
-            "By confirming your payment, you allow "
-                + "\(session.merchant.displayName) to request a Mobile Money payment. "
-                + "You may be asked to approve it on your phone."
+            "By paying, you authorize this Mobile Money request. "
+                + "Approval on your phone may be required."
         )
         .font(.footnote)
         .foregroundStyle(.secondary)
         .lineSpacing(2)
         .accessibilityLabel(
-            "Payment consent. By confirming your payment, you allow "
-                + "\(session.merchant.displayName) to request a Mobile Money payment."
+            "Payment consent. By paying, you authorize this Mobile Money request. "
+                + "Approval on your phone may be required."
         )
     }
 
@@ -1062,7 +1484,13 @@ struct PaymentSheetView: View {
         _ session: PaymentSheetSession,
         isProcessing: Bool
     ) -> some View {
-        Button {
+        let isEnabled = !isProcessing && model.canPay
+        let usesPrimaryStyle = isProcessing || model.canPay
+        let shape = RoundedRectangle(
+            cornerRadius: model.configuration.appearance.cornerRadius ?? 16
+        )
+
+        return Button {
             Task {
                 if let result = await model.pay() {
                     onResult(result)
@@ -1071,23 +1499,37 @@ struct PaymentSheetView: View {
         } label: {
             HStack {
                 if isProcessing {
-                    ProgressView().tint(primaryButtonForegroundColor)
+                    ProgressView()
+                        .tint(primaryButtonForegroundColor)
                 }
                 Text(isProcessing ? "Starting payment" : "Pay \(session.amount.formatted)")
                     .fontWeight(.regular)
+                    .foregroundColor(
+                        usesPrimaryStyle
+                            ? primaryButtonForegroundColor
+                            : Color(uiColor: .secondaryLabel)
+                    )
             }
             .frame(maxWidth: .infinity)
-            .frame(minHeight: 28)
-        }
-        .buttonStyle(.borderedProminent)
-        .foregroundStyle(primaryButtonForegroundColor)
-        .buttonBorderShape(
-            .roundedRectangle(
-                radius: model.configuration.appearance.cornerRadius ?? 16
+            .frame(minHeight: 52)
+            .background(
+                usesPrimaryStyle
+                    ? primaryColor
+                    : Color(uiColor: .systemGray4),
+                in: shape
             )
+            .overlay {
+                if !usesPrimaryStyle {
+                    shape.stroke(Color.secondary.opacity(0.18), lineWidth: 1)
+                }
+            }
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .accessibilityHint(
+            isEnabled ? "" : "Complete the payment details to continue."
         )
-        .controlSize(.large)
-        .disabled(isProcessing || !model.canPay)
     }
 
     private func symbol(for kind: PaymentSheetSession.PaymentMethod.Kind) -> String {
@@ -1198,8 +1640,6 @@ private enum PaymentSheetResources {
                 ),
                 onResult: { _ in }
             )
-            .presentationDetents([.medium, .large])
-            .presentationDragIndicator(.visible)
         }
 }
 #endif

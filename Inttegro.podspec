@@ -1,7 +1,7 @@
 Pod::Spec.new do |spec|
   spec.name = 'Inttegro'
-  spec.version = '0.2.0'
-  spec.summary = 'Native iOS payment sheet for Inttegro Checkout.'
+  spec.version = '0.3.0'
+  spec.summary = 'Native Inttegro checkout and payment sheet for iOS.'
   spec.homepage = 'https://inttegro.com'
   spec.license = { type: 'MIT' }
   spec.author = { 'Inttegro Eng' => 'engineering@inttegro.com' }
@@ -9,7 +9,7 @@ Pod::Spec.new do |spec|
     git: 'https://github.com/inttegro/inttegro-sdk-ios.git',
     tag: "v#{spec.version}",
   }
-  spec.source_files = 'Sources/Inttegro/**/*.swift'
+  spec.source_files = 'Sources/**/*.swift'
   spec.resource_bundles = {
     'Inttegro' => ['Sources/Inttegro/Resources/**/*.xcassets'],
   }

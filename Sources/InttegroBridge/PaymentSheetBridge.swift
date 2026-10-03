@@ -2,6 +2,10 @@ import CoreFoundation
 import Foundation
 import UIKit
 
+#if SWIFT_PACKAGE
+import Inttegro
+#endif
+
 /// Stateful, Objective-C-compatible entry point used by cross-platform SDKs.
 ///
 /// Each React Native module or Flutter plugin instance owns one coordinator so
@@ -9,19 +13,39 @@ import UIKit
 @MainActor
 @objc(InttegroPaymentSheetCoordinator)
 public final class PaymentSheetCoordinator: NSObject {
+    /// Objective-C completion used when validating cross-platform configuration.
     public typealias InitializationCompletion = (String?, String?) -> Void
+    /// Objective-C completion containing a result payload or stable error.
     public typealias PresentationCompletion = (NSDictionary?, String?, String?) -> Void
+    /// Objective-C callback for privacy-safe diagnostic payloads.
     public typealias TelemetryEventHandler = (NSDictionary) -> Void
 
     private var configuration: PaymentSheetConfiguration?
     private var activeSheet: PaymentSheet?
     private var telemetryEventHandler: TelemetryEventHandler?
 
+    /// Replaces the host callback that receives bridge-safe diagnostic events.
+    ///
+    /// Cross-platform adapters should install this before presentation and clear
+    /// it when their engine or module is invalidated.
+    ///
+    /// - Parameter handler: Callback for ordered, bridge-safe event dictionaries,
+    ///   or `nil` to stop forwarding diagnostics.
     @objc(setTelemetryEventHandler:)
     public func setTelemetryEventHandler(_ handler: TelemetryEventHandler?) {
         telemetryEventHandler = handler
     }
 
+    /// Validates and stores a versioned dictionary from a framework adapter.
+    ///
+    /// Native Swift applications should construct `PaymentSheetConfiguration`
+    /// from the `Inttegro` product directly instead of calling this bridge.
+    ///
+    /// - Parameters:
+    ///   - payload: Versioned configuration containing a public Order ID and
+    ///     optional presentation settings.
+    ///   - completion: Called with `nil` values on success or a stable error code
+    ///     and message when validation fails.
     @objc(initializePaymentSheet:completion:)
     public func initializePaymentSheet(
         _ payload: NSDictionary,
@@ -43,6 +67,15 @@ public final class PaymentSheetCoordinator: NSObject {
         }
     }
 
+    /// Presents the configured native sheet for a framework adapter.
+    ///
+    /// The completion is invoked exactly once with a bridge-safe terminal result
+    /// or a stable initialization/presentation error.
+    ///
+    /// - Parameters:
+    ///   - presentingViewController: Visible controller that owns presentation.
+    ///   - completion: Called with a terminal result dictionary or a stable error
+    ///     code and message when presentation cannot start.
     @objc(presentPaymentSheetFrom:completion:)
     public func presentPaymentSheet(
         from presentingViewController: UIViewController,
@@ -83,10 +116,33 @@ public final class PaymentSheetCoordinator: NSObject {
     }
 }
 
+extension PaymentSheetTelemetryEvent {
+    var bridgePayload: [String: Any] {
+        let timestampFormatter = ISO8601DateFormatter()
+        timestampFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var value: [String: Any] = [
+            "flowId": flowID,
+            "sequence": sequence,
+            "name": name.rawValue,
+            "timestamp": timestampFormatter.string(from: timestamp),
+        ]
+        if let operation { value["operation"] = operation }
+        if let httpStatusCode { value["httpStatusCode"] = httpStatusCode }
+        if let requestID { value["requestId"] = requestID }
+        if let retryAfterSeconds { value["retryAfterSeconds"] = retryAfterSeconds }
+        if let errorType { value["errorType"] = errorType }
+        return value
+    }
+}
+
 extension PaymentSheetConfiguration {
     init(bridgePayload payload: NSDictionary) throws {
-        guard let rawOrderID = payload["orderId"] as? String else {
-            throw PaymentSheetBridgeError("orderId must be a string")
+        let rawOrderID = payload["orderId"] as? String
+        let rawPurchaseIntentID = payload["purchaseIntentId"] as? String
+        guard (rawOrderID != nil) != (rawPurchaseIntentID != nil) else {
+            throw PaymentSheetBridgeError(
+                "Provide exactly one of orderId or purchaseIntentId"
+            )
         }
         if payload["wallets"] != nil {
             throw PaymentSheetBridgeError(
@@ -107,13 +163,23 @@ extension PaymentSheetConfiguration {
         let appearance = try Self.bridgeAppearance(payload["appearance"])
         let telemetry = try Self.bridgeTelemetry(payload["telemetry"])
         let features = try Self.bridgeFeatures(payload["features"])
-        try self.init(
-            orderID: rawOrderID,
-            returnURL: returnURL,
-            appearance: appearance,
-            telemetry: telemetry,
-            features: features
-        )
+        if let rawOrderID {
+            try self.init(
+                orderID: rawOrderID,
+                returnURL: returnURL,
+                appearance: appearance,
+                telemetry: telemetry,
+                features: features
+            )
+        } else {
+            try self.init(
+                purchaseIntentID: rawPurchaseIntentID!,
+                returnURL: returnURL,
+                appearance: appearance,
+                telemetry: telemetry,
+                features: features
+            )
+        }
     }
 
     private static func bridgeAppearance(_ value: Any?) throws -> Appearance {
@@ -216,6 +282,12 @@ extension PaymentSheetResult {
             ]
             if let declineCode = failure.declineCode {
                 error["declineCode"] = declineCode
+            }
+            if let requestID = failure.requestID {
+                error["requestId"] = requestID
+            }
+            if let retryAfterSeconds = failure.retryAfterSeconds {
+                error["retryAfterSeconds"] = retryAfterSeconds
             }
             return [
                 "status": "failed",

@@ -4,6 +4,11 @@ import Foundation
 final class PaymentSheetViewModel: ObservableObject {
     enum State: Equatable {
         case loading
+        case amountSelection(
+            PaymentSheetAmountSelection,
+            isProcessing: Bool,
+            failure: PaymentSheetFailure?
+        )
         case ready(PaymentSheetSession)
         case processing(PaymentSheetSession)
         case confirmation(
@@ -30,6 +35,10 @@ final class PaymentSheetViewModel: ObservableObject {
         case accountNumber
         case network
         case billingName
+        case billingLine1
+        case billingCity
+        case billingRegion
+        case billingPostCode
         case billingCountry
         case confirmationToken
     }
@@ -58,10 +67,12 @@ final class PaymentSheetViewModel: ObservableObject {
     @Published var billingPostCode = ""
     @Published var billingCountry = "GH"
     @Published var confirmationToken = ""
+    @Published var selectedAmountValue = 0
 
     let configuration: PaymentSheetConfiguration
     private let adapter: any PaymentSheetAdapter
     private let telemetry: PaymentSheetTelemetry
+    private var amountOrderID: String?
     private var networkSelectionSource: NetworkSelectionSource?
 
     init(
@@ -78,7 +89,9 @@ final class PaymentSheetViewModel: ObservableObject {
 
     var isProcessing: Bool {
         switch state {
-        case .processing, .confirmation(_, _, isProcessing: true, failure: _):
+        case .processing,
+             .amountSelection(_, isProcessing: true, failure: _),
+             .confirmation(_, _, isProcessing: true, failure: _):
             true
         default:
             false
@@ -105,7 +118,7 @@ final class PaymentSheetViewModel: ObservableObject {
             session
         case let .completed(session, _, _):
             session
-        case .loading, .failed:
+        case .loading, .amountSelection, .failed:
             nil
         }
     }
@@ -113,6 +126,19 @@ final class PaymentSheetViewModel: ObservableObject {
     var completedResult: PaymentSheetResult? {
         guard case let .completed(_, paymentID, _) = state else { return nil }
         return .completed(paymentID: paymentID)
+    }
+
+    var canSelectAmount: Bool {
+        guard case let .amountSelection(selection, false, _) = state else {
+            return false
+        }
+        return selectedAmountValue >= selection.minimum
+            && (selection.maximum == nil || selectedAmountValue <= selection.maximum!)
+    }
+
+    var canChangeAmount: Bool {
+        guard case let .ready(session) = state else { return false }
+        return session.lineItems.contains { $0.amountSelection != nil }
     }
 
     var canPay: Bool {
@@ -147,6 +173,10 @@ final class PaymentSheetViewModel: ObservableObject {
 
     var paymentMethodOwnerReady: Bool {
         !billingName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !billingLine1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !billingCity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !billingRegion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && !billingPostCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && billingCountry
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .range(of: "^[A-Za-z]{2}$", options: .regularExpression) != nil
@@ -173,10 +203,32 @@ final class PaymentSheetViewModel: ObservableObject {
         state = .loading
         inlineFailure = nil
         validationMessages = [:]
+        amountOrderID = nil
         do {
-            let session = try await adapter.retrieveCheckout(
-                orderID: configuration.orderID
-            )
+            if let purchaseIntentID = configuration.purchaseIntentID {
+                let selection = try await adapter.retrieveAmountSelection(
+                    purchaseIntentID: purchaseIntentID
+                )
+                if let expiresAt = selection.expiresAt, expiresAt <= Date() {
+                    throw PaymentSheetError.checkoutExpired
+                }
+                selectedAmountValue = selection.suggestions
+                    .first(where: \.recommended)?.value
+                    ?? selection.minimum
+                state = .amountSelection(
+                    selection,
+                    isProcessing: false,
+                    failure: nil
+                )
+                telemetry.emit(.checkoutLoadSucceeded)
+                return
+            }
+            guard let orderID = configuration.orderID else {
+                throw PaymentSheetError.invalidConfiguration(
+                    "A Checkout reference is required."
+                )
+            }
+            let session = try await adapter.retrieveCheckout(orderID: orderID)
             guard session.expiresAt > Date() else {
                 throw PaymentSheetError.checkoutExpired
             }
@@ -191,6 +243,79 @@ final class PaymentSheetViewModel: ObservableObject {
                 errorType: PaymentSheetTelemetry.safeErrorType(failure.code)
             )
         }
+    }
+
+    func chooseAmount(_ value: Int) {
+        selectedAmountValue = value
+        if case let .amountSelection(selection, _, _) = state {
+            state = .amountSelection(selection, isProcessing: false, failure: nil)
+        }
+    }
+
+    func continueWithSelectedAmount() async {
+        guard case let .amountSelection(selection, false, _) = state,
+              canSelectAmount else {
+            return
+        }
+        state = .amountSelection(selection, isProcessing: true, failure: nil)
+        do {
+            let amount = PaymentSheetSession.Money(
+                value: selectedAmountValue,
+                currency: selection.currency
+            )
+            let session: PaymentSheetSession
+            if let amountOrderID {
+                guard let lineItemID = selection.lineItemID else {
+                    throw PaymentSheetError.invalidConfiguration(
+                        "The editable line item is missing."
+                    )
+                }
+                session = try await adapter.updateAmount(
+                    orderID: amountOrderID,
+                    lineItemID: lineItemID,
+                    amount: amount
+                )
+            } else {
+                guard let purchaseIntentID = selection.purchaseIntentID else {
+                    throw PaymentSheetError.invalidConfiguration(
+                        "A Purchase Intent ID is required to create this checkout."
+                    )
+                }
+                session = try await adapter.selectAmount(
+                    purchaseIntentID: purchaseIntentID,
+                    amount: amount
+                )
+            }
+            guard session.expiresAt > Date() else {
+                throw PaymentSheetError.checkoutExpired
+            }
+            amountOrderID = session.id
+            selectedPaymentMethodID = session.paymentMethods.first?.id
+            state = .ready(session)
+        } catch {
+            state = .amountSelection(
+                selection,
+                isProcessing: false,
+                failure: Self.failure(from: error)
+            )
+        }
+    }
+
+    func editAmount(lineItemID: String) {
+        guard case let .ready(session) = state,
+              let lineItem = session.lineItems.first(where: { $0.id == lineItemID }),
+              let amountSelection = lineItem.amountSelection else {
+            return
+        }
+        amountOrderID = session.id
+        selectedAmountValue = lineItem.total.value
+        inlineFailure = nil
+        validationMessages = [:]
+        state = .amountSelection(
+            amountSelection,
+            isProcessing: false,
+            failure: nil
+        )
     }
 
     func pay() async -> PaymentSheetResult? {
@@ -330,6 +455,18 @@ final class PaymentSheetViewModel: ObservableObject {
             if name.isEmpty {
                 validationMessages[.billingName] = "Enter your name to save this account."
             }
+            if billingLine1.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                validationMessages[.billingLine1] = "Enter your street address."
+            }
+            if billingCity.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                validationMessages[.billingCity] = "Enter your city."
+            }
+            if billingRegion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                validationMessages[.billingRegion] = "Enter your region."
+            }
+            if billingPostCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                validationMessages[.billingPostCode] = "Enter your postal code."
+            }
             if country.range(of: "^[A-Z]{2}$", options: .regularExpression) == nil {
                 validationMessages[.billingCountry] = "Use a two-letter country code."
             }
@@ -421,6 +558,15 @@ final class PaymentSheetViewModel: ObservableObject {
     }
 
     private static func failure(from error: Error) -> PaymentSheetFailure {
+        if let error = error as? PaymentSheetRequestError {
+            return PaymentSheetFailure(
+                code: error.code,
+                message: error.message,
+                declineCode: error.declineCode,
+                requestID: error.requestID,
+                retryAfterSeconds: error.retryAfterSeconds
+            )
+        }
         if let error = error as? PaymentSheetError {
             return PaymentSheetFailure(
                 code: error.code,

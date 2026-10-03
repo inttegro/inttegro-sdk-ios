@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import Inttegro
+@testable import InttegroBridge
 
 @Suite("Payment sheet bridge")
 struct PaymentSheetBridgeTests {
@@ -42,6 +43,16 @@ struct PaymentSheetBridgeTests {
         #expect(configuration.features.showInvoiceDownload)
         #expect(configuration.features.showReceiptDownload)
         #expect(!configuration.features.allowPaymentMethodChange)
+    }
+
+    @Test("Decodes a customer-selected Purchase Intent")
+    func decodesPurchaseIntentConfiguration() throws {
+        let configuration = try PaymentSheetConfiguration(
+            bridgePayload: ["purchaseIntentId": "sale_test"] as NSDictionary
+        )
+
+        #expect(configuration.purchaseIntentID == "sale_test")
+        #expect(configuration.orderID == nil)
     }
 
     @Test("Rejects malformed nested configuration")
@@ -86,7 +97,9 @@ struct PaymentSheetBridgeTests {
                     .init(
                         code: "declined",
                         message: "Payment declined.",
-                        declineCode: "insufficient_funds"
+                        declineCode: "insufficient_funds",
+                        requestID: "req_test",
+                        retryAfterSeconds: 30
                     )
                 ).bridgePayload
             ) == [
@@ -95,6 +108,8 @@ struct PaymentSheetBridgeTests {
                     "code": "declined",
                     "message": "Payment declined.",
                     "declineCode": "insufficient_funds",
+                    "requestId": "req_test",
+                    "retryAfterSeconds": 30,
                 ],
             ] as NSDictionary
         )

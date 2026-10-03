@@ -4,6 +4,107 @@ import Testing
 
 @Suite("Checkout payment sheet adapter")
 struct CheckoutPaymentSheetAdapterTests {
+    @Test("Maps and finalizes a customer-selected amount")
+    func mapsCustomerSelectedAmount() async throws {
+        let transport = StubTransport(responses: [
+            "/checkout/lookup": """
+            {
+              "purchase_intent": {
+                "id": "sale_test",
+                "merchant": {"app_name": "Field & Form"},
+                "product": {"id": "prod_test", "name": "Community garden"},
+                "price": {
+                  "id": "pr_test",
+                  "type": "customer_selected_amount",
+                  "customer_selected_amount": {
+                    "currency": "ghs",
+                    "minimum": 500,
+                    "maximum": 5000,
+                    "suggested_amounts": [
+                      {"id": "recommended", "value": 1000, "recommended": true}
+                    ]
+                  }
+                }
+              }
+            }
+            """,
+            "/checkout/select_amount": """
+            {
+              "order": {
+                "id": "or_test",
+                "status": "requires_payment",
+                "expires_at": "2030-01-02T03:04:05Z",
+                "payment": {
+                  "status": "initiated",
+                  "amount": {"value": 1250, "currency": "ghs"},
+                  "payment_method_types": ["mobile_money"]
+                },
+                "invoice": {"beneficiary": {"name": "Field & Form"}}
+              }
+            }
+            """,
+        ])
+        let adapter = makeAdapter(transport)
+
+        let selection = try await adapter.retrieveAmountSelection(
+            purchaseIntentID: "sale_test"
+        )
+        let session = try await adapter.selectAmount(
+            purchaseIntentID: "sale_test",
+            amount: .init(value: 1_250, currency: "GHS")
+        )
+
+        #expect(selection.minimum == 500)
+        #expect(selection.suggestions.first?.value == 1_000)
+        #expect(session.id == "or_test")
+        let request = try #require(await transport.request(for: "/checkout/select_amount"))
+        let body = try #require(request.httpBody)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(json["purchase_intent_id"] as? String == "sale_test")
+        let amount = try #require(json["selected_amount"] as? [String: Any])
+        #expect(amount["currency"] as? String == "ghs")
+        #expect(amount["value"] as? Int == 1_250)
+        #expect(request.value(forHTTPHeaderField: "Idempotency-Key") != nil)
+    }
+
+    @Test("Updates the selected amount on the existing Order")
+    func updatesCustomerSelectedAmount() async throws {
+        let transport = StubTransport(responses: [
+            "/checkout/select_amount": """
+            {
+              "order": {
+                "id": "or_test",
+                "status": "requires_payment",
+                "expires_at": "2030-01-02T03:04:05Z",
+                "payment": {
+                  "status": "initiated",
+                  "amount": {"value": 2500, "currency": "ghs"},
+                  "payment_method_types": ["mobile_money"]
+                },
+                "invoice": {"beneficiary": {"name": "Field & Form"}}
+              }
+            }
+            """,
+        ])
+        let adapter = makeAdapter(transport)
+
+        _ = try await adapter.updateAmount(
+            orderID: "or_test",
+            lineItemID: "li_customer_selected",
+            amount: .init(value: 2_500, currency: "GHS")
+        )
+
+        let request = try #require(await transport.request(for: "/checkout/select_amount"))
+        let body = try #require(request.httpBody)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(json["purchase_intent_id"] == nil)
+        #expect(json["order_id"] as? String == "or_test")
+        #expect(json["line_item_id"] as? String == "li_customer_selected")
+        let amount = try #require(json["selected_amount"] as? [String: Any])
+        #expect(amount["value"] as? Int == 2_500)
+        #expect(request.value(forHTTPHeaderField: "Idempotency-Key") != nil)
+    }
+
     @Test("Maps the public checkout without retaining customer details")
     func mapsLookupResponse() async throws {
         let transport = StubTransport(responses: [
@@ -80,7 +181,10 @@ struct CheckoutPaymentSheetAdapterTests {
                       "product": {
                         "id": "li_product",
                         "name": "Woven basket",
-                        "price": {"value": 5000, "currency": "GHS"},
+                        "price": {
+                          "type": "fixed_amount",
+                          "fixed_amount": {"value": 5000, "currency": "GHS"}
+                        },
                         "quantity": 2
                       }
                     },
@@ -701,6 +805,82 @@ struct CheckoutPaymentSheetAdapterTests {
         #expect(request.value(forHTTPHeaderField: "Idempotency-Key") == nil)
     }
 
+    @Test("Retries a transient mutation once with the same idempotency key")
+    func retriesTransientMutation() async throws {
+        let transport = SequencedStubTransport(responses: [
+            .init(
+                statusCode: 503,
+                body: #"{"error":{"code":"temporarily_unavailable","message":"Try again."}}"#,
+                headers: ["X-Request-Id": "req_first", "Retry-After": "2"]
+            ),
+            .init(
+                statusCode: 200,
+                body: #"{"order":{"id":"or_test","status":"paid","payment":{"id":"py_test","status":"paid"}}}"#,
+                headers: ["X-Request-Id": "req_second"]
+            ),
+        ])
+        let adapter = CheckoutPaymentSheetAdapter(
+            baseURL: URL(string: "https://example.test")!,
+            executeRequest: { request in try await transport.execute(request) },
+            retrySleeper: { _ in }
+        )
+        let method = PaymentSheetSession.PaymentMethod(
+            id: "pm_test",
+            kind: .mobileMoney,
+            label: "MTN Mobile Money"
+        )
+        let session = PaymentSheetSession(
+            id: "or_test",
+            merchant: .init(displayName: "Field & Form"),
+            amount: .init(value: 12_500, currency: "GHS"),
+            paymentMethods: [method],
+            expiresAt: .distantFuture
+        )
+
+        let outcome = try await adapter.pay(session: session, selection: .saved(method))
+
+        #expect(outcome == .completed(paymentID: "py_test"))
+        let keys = await transport.idempotencyKeys
+        #expect(keys.count == 2)
+        #expect(keys[0] == keys[1])
+    }
+
+    @Test("Preserves request metadata after the bounded retry is exhausted")
+    func preservesFailureMetadata() async throws {
+        let unavailable = SequencedStubTransport.Response(
+            statusCode: 503,
+            body: #"{"error":{"code":"temporarily_unavailable","message":"Try again."}}"#,
+            headers: ["X-Request-Id": "req_retry", "Retry-After": "30"]
+        )
+        let transport = SequencedStubTransport(responses: [unavailable, unavailable])
+        let adapter = CheckoutPaymentSheetAdapter(
+            baseURL: URL(string: "https://example.test")!,
+            executeRequest: { request in try await transport.execute(request) },
+            retrySleeper: { _ in }
+        )
+        let method = PaymentSheetSession.PaymentMethod(
+            id: "pm_test",
+            kind: .mobileMoney,
+            label: "MTN Mobile Money"
+        )
+        let session = PaymentSheetSession(
+            id: "or_test",
+            merchant: .init(displayName: "Field & Form"),
+            amount: .init(value: 12_500, currency: "GHS"),
+            paymentMethods: [method],
+            expiresAt: .distantFuture
+        )
+
+        do {
+            _ = try await adapter.pay(session: session, selection: .saved(method))
+            Issue.record("Expected the transient error to be returned")
+        } catch let error as PaymentSheetRequestError {
+            #expect(error.code == "temporarily_unavailable")
+            #expect(error.requestID == "req_retry")
+            #expect(error.retryAfterSeconds == 30)
+        }
+    }
+
     private func makeAdapter(_ transport: StubTransport) -> CheckoutPaymentSheetAdapter {
         CheckoutPaymentSheetAdapter(
             baseURL: URL(string: "https://example.test")!,
@@ -708,6 +888,38 @@ struct CheckoutPaymentSheetAdapterTests {
                 try await transport.execute(request)
             }
         )
+    }
+}
+
+private actor SequencedStubTransport {
+    struct Response: Sendable {
+        let statusCode: Int
+        let body: String
+        let headers: [String: String]
+    }
+
+    private var responses: [Response]
+    private(set) var idempotencyKeys: [String] = []
+
+    init(responses: [Response]) {
+        self.responses = responses
+    }
+
+    func execute(_ request: URLRequest) throws -> (Data, URLResponse) {
+        guard !responses.isEmpty, let url = request.url else {
+            throw URLError(.badServerResponse)
+        }
+        if let key = request.value(forHTTPHeaderField: "Idempotency-Key") {
+            idempotencyKeys.append(key)
+        }
+        let next = responses.removeFirst()
+        let response = HTTPURLResponse(
+            url: url,
+            statusCode: next.statusCode,
+            httpVersion: "HTTP/1.1",
+            headerFields: next.headers
+        )!
+        return (Data(next.body.utf8), response)
     }
 }
 

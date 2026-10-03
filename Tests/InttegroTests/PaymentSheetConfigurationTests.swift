@@ -13,6 +13,16 @@ struct PaymentSheetConfigurationTests {
         #expect(configuration.orderID == "or_test")
     }
 
+    @Test("Accepts a customer-selected Purchase Intent")
+    func acceptsPurchaseIntentID() throws {
+        let configuration = try PaymentSheetConfiguration(
+            purchaseIntentID: "  sale_test  "
+        )
+
+        #expect(configuration.purchaseIntentID == "sale_test")
+        #expect(configuration.orderID == nil)
+    }
+
     @Test("Rejects an empty checkout Order ID")
     func rejectsEmptyOrderID() {
         #expect(throws: PaymentSheetError.self) {

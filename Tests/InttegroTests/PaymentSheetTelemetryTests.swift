@@ -1,6 +1,7 @@
 import Foundation
 import Testing
 @testable import Inttegro
+@testable import InttegroBridge
 
 @Suite("Payment sheet telemetry")
 struct PaymentSheetTelemetryTests {
@@ -24,7 +25,8 @@ struct PaymentSheetTelemetryTests {
             .responseReceived,
             operation: "checkout.lookup",
             httpStatusCode: 200,
-            requestID: "req_test"
+            requestID: "req_test",
+            retryAfterSeconds: 30
         )
 
         let emitted = events.snapshot()
@@ -41,6 +43,7 @@ struct PaymentSheetTelemetryTests {
             "operation",
             "httpStatusCode",
             "requestId",
+            "retryAfterSeconds",
         ])
         #expect(payload["orderId"] == nil)
         #expect(payload["paymentId"] == nil)

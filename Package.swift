@@ -7,6 +7,7 @@ let package = Package(
     platforms: [.iOS(.v16)],
     products: [
         .library(name: "Inttegro", targets: ["Inttegro"]),
+        .library(name: "InttegroBridge", targets: ["InttegroBridge"]),
     ],
     dependencies: [
         .package(
@@ -19,9 +20,13 @@ let package = Package(
             name: "Inttegro",
             resources: [.process("Resources")]
         ),
+        .target(
+            name: "InttegroBridge",
+            dependencies: ["Inttegro"]
+        ),
         .testTarget(
             name: "InttegroTests",
-            dependencies: ["Inttegro"]
+            dependencies: ["Inttegro", "InttegroBridge"]
         ),
     ]
 )

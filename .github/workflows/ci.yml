@@ -37,6 +37,6 @@ jobs:
             puts phone.fetch("udid")
           ')"
           xcodebuild test \
-            -scheme Inttegro \
+            -scheme Inttegro-Package \
             -destination "platform=iOS Simulator,id=${device_id}" \
             CODE_SIGNING_ALLOWED=NO

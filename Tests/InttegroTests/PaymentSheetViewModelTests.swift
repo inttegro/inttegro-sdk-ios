@@ -4,6 +4,130 @@ import Testing
 
 @Suite("Payment sheet view model")
 struct PaymentSheetViewModelTests {
+    @Test("Creates an Order after the payer chooses an amount")
+    @MainActor
+    func createsOrderForSelectedAmount() async throws {
+        let selection = PaymentSheetAmountSelection(
+            purchaseIntentID: "sale_test",
+            merchantName: "Field & Form",
+            productName: "Community garden",
+            currency: "GHS",
+            minimum: 500,
+            maximum: 5_000,
+            suggestions: [
+                .init(id: "recommended", value: 1_000, recommended: true),
+            ]
+        )
+        let editableSelection = PaymentSheetAmountSelection(
+            orderID: "or_test",
+            lineItemID: "li_selected",
+            merchantName: selection.merchantName,
+            productName: selection.productName,
+            currency: selection.currency,
+            minimum: selection.minimum,
+            maximum: selection.maximum,
+            suggestions: selection.suggestions
+        )
+        let adapter = ViewModelAdapter(
+            session: editableSession(selection: editableSelection),
+            amountSelection: selection
+        )
+        let model = PaymentSheetViewModel(
+            configuration: try .init(purchaseIntentID: "sale_test"),
+            adapter: adapter
+        )
+
+        await model.load()
+        guard case .amountSelection = model.state else {
+            Issue.record("Expected amount selection")
+            return
+        }
+        #expect(model.selectedAmountValue == 1_000)
+
+        model.chooseAmount(1_250)
+        await model.continueWithSelectedAmount()
+
+        guard case .ready = model.state else {
+            Issue.record("Expected finalized Checkout")
+            return
+        }
+        #expect(await adapter.selectedAmount?.value == 1_250)
+        #expect(model.canChangeAmount)
+
+        model.editAmount(lineItemID: "li_selected")
+        guard case .amountSelection = model.state else {
+            Issue.record("Expected amount selection after editing")
+            return
+        }
+        model.chooseAmount(2_500)
+        await model.continueWithSelectedAmount()
+
+        guard case .ready = model.state else {
+            Issue.record("Expected updated Checkout")
+            return
+        }
+        #expect(await adapter.updatedAmount?.value == 2_500)
+    }
+
+    @Test("Edits a customer-selected amount on a merchant-created Order")
+    @MainActor
+    func editsMerchantCreatedOrderAmount() async throws {
+        let selection = PaymentSheetAmountSelection(
+            orderID: "or_test",
+            lineItemID: "li_selected",
+            merchantName: "Field & Form",
+            productName: "Community garden",
+            currency: "GHS",
+            minimum: 500,
+            maximum: 5_000
+        )
+        let editableSession = PaymentSheetSession(
+            id: "or_test",
+            merchant: .init(displayName: "Field & Form"),
+            amount: .init(value: 1_000, currency: "GHS"),
+            paymentMethods: [
+                .init(
+                    id: "new_mobile_money",
+                    kind: .mobileMoney,
+                    source: .new,
+                    label: "Mobile money"
+                ),
+            ],
+            expiresAt: .distantFuture,
+            lineItems: [
+                .init(
+                    id: "li_selected",
+                    name: "Community garden",
+                    total: .init(value: 1_000, currency: "GHS"),
+                    amountSelection: selection
+                ),
+            ]
+        )
+        let adapter = ViewModelAdapter(session: editableSession)
+        let model = PaymentSheetViewModel(
+            configuration: try .init(orderID: "or_test"),
+            adapter: adapter
+        )
+
+        await model.load()
+        guard case .ready = model.state else {
+            Issue.record("Expected the existing Checkout")
+            return
+        }
+        #expect(model.canChangeAmount)
+
+        model.editAmount(lineItemID: "li_selected")
+        model.chooseAmount(2_500)
+        await model.continueWithSelectedAmount()
+
+        guard case .ready = model.state else {
+            Issue.record("Expected the updated Checkout")
+            return
+        }
+        #expect(await adapter.updatedAmount?.value == 2_500)
+        #expect(await adapter.selectedAmount == nil)
+    }
+
     @Test("Suggests a network and preserves a ported-number override")
     @MainActor
     func suggestsAndOverridesNetwork() async throws {
@@ -90,7 +214,39 @@ struct PaymentSheetViewModelTests {
             model.validationMessage(for: .billingName)
                 == "Enter your name to save this account."
         )
+        #expect(
+            model.validationMessage(for: .billingLine1)
+                == "Enter your street address."
+        )
+        #expect(model.validationMessage(for: .billingCity) == "Enter your city.")
+        #expect(model.validationMessage(for: .billingRegion) == "Enter your region.")
+        #expect(
+            model.validationMessage(for: .billingPostCode)
+                == "Enter your postal code."
+        )
         #expect(await adapter.payCallCount == 0)
+    }
+
+    @Test("Requires a complete billing address when saving a payment method")
+    @MainActor
+    func requiresCompleteBillingAddress() async throws {
+        let model = PaymentSheetViewModel(
+            configuration: try .init(orderID: "or_test"),
+            adapter: ViewModelAdapter(session: session())
+        )
+        await model.load()
+        model.mobileMoneyAccountNumber = "0244000042"
+        model.savePaymentMethod = true
+        model.billingName = "Ama Mensah"
+        model.billingLine1 = "14 Independence Avenue"
+        model.billingCity = "Accra"
+        model.billingRegion = "Greater Accra"
+
+        #expect(!model.canPay)
+
+        model.billingPostCode = "GA-184-8164"
+
+        #expect(model.canPay)
     }
 
     @Test("Enters confirmation and validates the exact token size")
@@ -220,24 +376,50 @@ struct PaymentSheetViewModelTests {
             expiresAt: .distantFuture
         )
     }
+
+    private func editableSession(
+        selection: PaymentSheetAmountSelection
+    ) -> PaymentSheetSession {
+        let base = session()
+        return PaymentSheetSession(
+            id: base.id,
+            merchant: base.merchant,
+            amount: base.amount,
+            paymentMethods: base.paymentMethods,
+            expiresAt: base.expiresAt,
+            lineItems: [
+                .init(
+                    id: "li_selected",
+                    name: "Community garden",
+                    total: .init(value: 1_000, currency: "GHS"),
+                    amountSelection: selection
+                ),
+            ]
+        )
+    }
 }
 
 private actor ViewModelAdapter: PaymentSheetAdapter {
     private let session: PaymentSheetSession
+    private let amountSelection: PaymentSheetAmountSelection?
     private let payOutcome: PaymentSheetPaymentOutcome
     private let confirmOutcome: PaymentSheetPaymentOutcome
     private let refreshOutcome: PaymentSheetPaymentOutcome
     private(set) var payCallCount = 0
     private(set) var confirmCallCount = 0
     private(set) var refreshCallCount = 0
+    private(set) var selectedAmount: PaymentSheetSession.Money?
+    private(set) var updatedAmount: PaymentSheetSession.Money?
 
     init(
         session: PaymentSheetSession,
+        amountSelection: PaymentSheetAmountSelection? = nil,
         payOutcome: PaymentSheetPaymentOutcome = .completed(paymentID: "py_test"),
         confirmOutcome: PaymentSheetPaymentOutcome = .completed(paymentID: "py_test"),
         refreshOutcome: PaymentSheetPaymentOutcome = .completed(paymentID: "py_test")
     ) {
         self.session = session
+        self.amountSelection = amountSelection
         self.payOutcome = payOutcome
         self.confirmOutcome = confirmOutcome
         self.refreshOutcome = refreshOutcome
@@ -245,6 +427,32 @@ private actor ViewModelAdapter: PaymentSheetAdapter {
 
     func retrieveCheckout(orderID _: String) async throws -> PaymentSheetSession {
         session
+    }
+
+    func retrieveAmountSelection(
+        purchaseIntentID _: String
+    ) async throws -> PaymentSheetAmountSelection {
+        guard let amountSelection else {
+            throw PaymentSheetError.checkoutUnavailable
+        }
+        return amountSelection
+    }
+
+    func selectAmount(
+        purchaseIntentID _: String,
+        amount: PaymentSheetSession.Money
+    ) async throws -> PaymentSheetSession {
+        selectedAmount = amount
+        return session
+    }
+
+    func updateAmount(
+        orderID _: String,
+        lineItemID _: String,
+        amount: PaymentSheetSession.Money
+    ) async throws -> PaymentSheetSession {
+        updatedAmount = amount
+        return session
     }
 
     func pay(

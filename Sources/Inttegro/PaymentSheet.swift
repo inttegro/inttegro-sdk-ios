@@ -1,8 +1,27 @@
 import SwiftUI
 import UIKit
 
+/// UIKit presenter for Inttegro's native Checkout experience.
+///
+/// `PaymentSheet` retrieves the client-safe Checkout projection, renders the
+/// familiar Inttegro payment flow, collects a supported payment method, and
+/// handles confirmation or provider authorization. Create a new instance for
+/// each Order presentation.
+///
+/// The sheet retains its completion handler only while it is presented. All
+/// methods and callbacks are isolated to the main actor.
+///
+/// ```swift
+/// let sheet = PaymentSheet(configuration: configuration)
+/// sheet.present(from: viewController) { result in
+///     if case .completed = result {
+///         verifyOrderFromBackend()
+///     }
+/// }
+/// ```
 @MainActor
 public final class PaymentSheet {
+    /// Callback invoked exactly once with the terminal presentation result.
     public typealias Completion = @MainActor (PaymentSheetResult) -> Void
 
     private let configuration: PaymentSheetConfiguration
@@ -11,6 +30,16 @@ public final class PaymentSheet {
     private weak var presentedController: UIViewController?
     private var completion: Completion?
 
+    /// Creates a payment sheet with an application-supplied Checkout adapter.
+    ///
+    /// Use this initializer for controlled previews, tests, or an adapter that
+    /// preserves Inttegro's public Checkout contract. Most applications should
+    /// use ``init(configuration:)``.
+    ///
+    /// - Parameters:
+    ///   - configuration: Validated Checkout and presentation options.
+    ///   - adapter: Transport and payment operations used by the state machine.
+    ///   - telemetry: Optional shared telemetry source for host diagnostics.
     public init(
         configuration: PaymentSheetConfiguration,
         adapter: any PaymentSheetAdapter,
@@ -23,10 +52,19 @@ public final class PaymentSheet {
         )
     }
 
+    /// Creates a payment sheet backed by Inttegro's public Checkout endpoints.
+    ///
+    /// This convenience initializer emits no host-observable events. Use
+    /// ``init(configuration:telemetryEventHandler:)`` to receive diagnostics.
     public convenience init(configuration: PaymentSheetConfiguration) {
         self.init(configuration: configuration, telemetryEventHandler: nil)
     }
 
+    /// Creates a Checkout-backed sheet with an optional diagnostic event handler.
+    ///
+    /// Inttegro installs no exporter. The handler receives privacy-safe events
+    /// synchronously in emission order and should hand expensive work to the
+    /// application's diagnostics pipeline.
     public convenience init(
         configuration: PaymentSheetConfiguration,
         telemetryEventHandler: PaymentSheetTelemetry.EventHandler?
@@ -42,6 +80,15 @@ public final class PaymentSheet {
         )
     }
 
+    /// Presents the sheet from a visible UIKit view controller.
+    ///
+    /// Only one presentation may be active for this instance. Recoverable
+    /// payment-attempt failures remain inside the sheet, while `completion`
+    /// receives only completion, cancellation, or a terminal failure.
+    ///
+    /// - Parameters:
+    ///   - presentingViewController: Visible controller that owns presentation.
+    ///   - completion: Main-actor callback invoked once when the sheet finishes.
     public func present(
         from presentingViewController: UIViewController,
         completion: @escaping Completion
@@ -74,8 +121,6 @@ public final class PaymentSheet {
         controller.modalPresentationStyle = .pageSheet
 
         if let sheet = controller.sheetPresentationController {
-            sheet.detents = [.medium(), .large()]
-            sheet.selectedDetentIdentifier = .medium
             sheet.prefersGrabberVisible = true
             sheet.prefersScrollingExpandsWhenScrolledToEdge = true
             sheet.prefersEdgeAttachedInCompactHeight = true
