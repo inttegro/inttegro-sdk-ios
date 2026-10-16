@@ -19,10 +19,19 @@ public final class PaymentSheetCoordinator: NSObject {
     public typealias PresentationCompletion = (NSDictionary?, String?, String?) -> Void
     /// Objective-C callback for privacy-safe diagnostic payloads.
     public typealias TelemetryEventHandler = (NSDictionary) -> Void
+    /// Objective-C callback for public Checkout lifecycle payloads.
+    public typealias LifecycleEventHandler = (NSDictionary) -> Void
 
     private var configuration: PaymentSheetConfiguration?
     private var activeSheet: PaymentSheet?
+    private var lifecycleEventHandler: LifecycleEventHandler?
     private var telemetryEventHandler: TelemetryEventHandler?
+
+    /// Replaces the host callback that receives application lifecycle events.
+    @objc(setLifecycleEventHandler:)
+    public func setLifecycleEventHandler(_ handler: LifecycleEventHandler?) {
+        lifecycleEventHandler = handler
+    }
 
     /// Replaces the host callback that receives bridge-safe diagnostic events.
     ///
@@ -105,6 +114,13 @@ public final class PaymentSheetCoordinator: NSObject {
                 let payload = event.bridgePayload as NSDictionary
                 Task { @MainActor in
                     self.telemetryEventHandler?(payload)
+                }
+            },
+            eventHandler: { [weak self] event in
+                guard let self else { return }
+                let payload = event.bridgePayload as NSDictionary
+                Task { @MainActor in
+                    self.lifecycleEventHandler?(payload)
                 }
             }
         )
@@ -269,31 +285,90 @@ extension PaymentSheetConfiguration {
 extension PaymentSheetResult {
     var bridgePayload: [String: Any] {
         switch self {
-        case let .completed(paymentID):
-            var payload: [String: Any] = ["status": "completed"]
-            if let paymentID { payload["paymentId"] = paymentID }
-            return payload
-        case .canceled:
-            return ["status": "canceled"]
-        case let .failed(failure):
-            var error: [String: Any] = [
-                "code": failure.code,
-                "message": failure.message,
-            ]
-            if let declineCode = failure.declineCode {
-                error["declineCode"] = declineCode
-            }
-            if let requestID = failure.requestID {
-                error["requestId"] = requestID
-            }
-            if let retryAfterSeconds = failure.retryAfterSeconds {
-                error["retryAfterSeconds"] = retryAfterSeconds
-            }
-            return [
-                "status": "failed",
-                "error": error,
-            ]
+        case let .completed(event), let .canceled(event), let .failed(event):
+            event.bridgePayload
         }
+    }
+}
+
+extension CheckoutEvent {
+    var bridgePayload: [String: Any] {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var payload: [String: Any] = [
+            "type": type.rawValue,
+            "occurredAt": formatter.string(from: occurredAt),
+            "flowId": flowID,
+            "sequence": sequence,
+        ]
+        if let order { payload["order"] = order.bridgePayload }
+        if let action { payload["action"] = action.bridgePayload }
+        if let failure { payload["failure"] = failure.bridgePayload }
+        if let complete { payload["complete"] = complete }
+        if let paymentMethod { payload["paymentMethod"] = paymentMethod }
+        return payload
+    }
+}
+
+private extension CheckoutOrder {
+    var bridgePayload: [String: Any] {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var payload: [String: Any] = [
+            "id": id,
+            "status": status.rawValue,
+            "merchant": ["displayName": merchant.displayName],
+            "amount": amount.bridgePayload,
+            "lineItems": lineItems.map(\.bridgePayload),
+            "documents": documents.bridgePayload,
+        ]
+        if let expiresAt { payload["expiresAt"] = formatter.string(from: expiresAt) }
+        return payload
+    }
+}
+
+private extension CheckoutOrder.Money {
+    var bridgePayload: [String: Any] {
+        ["value": value, "currency": currency]
+    }
+}
+
+private extension CheckoutOrder.LineItem {
+    var bridgePayload: [String: Any] {
+        var payload: [String: Any] = [
+            "id": id,
+            "name": name,
+            "total": total.bridgePayload,
+        ]
+        if let quantity { payload["quantity"] = quantity }
+        return payload
+    }
+}
+
+private extension CheckoutOrder.Documents {
+    var bridgePayload: [String: Any] {
+        var payload: [String: Any] = [:]
+        if let invoiceURL { payload["invoiceUrl"] = invoiceURL.absoluteString }
+        if let receiptURL { payload["receiptUrl"] = receiptURL.absoluteString }
+        return payload
+    }
+}
+
+private extension CheckoutAction {
+    var bridgePayload: [String: Any] {
+        var payload: [String: Any] = ["type": type.rawValue]
+        if let expiresAt {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            payload["expiresAt"] = formatter.string(from: expiresAt)
+        }
+        return payload
+    }
+}
+
+private extension CheckoutFailure {
+    var bridgePayload: [String: Any] {
+        ["code": code, "message": message, "recoverable": recoverable]
     }
 }
 

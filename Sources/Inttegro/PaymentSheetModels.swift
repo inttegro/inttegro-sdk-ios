@@ -516,6 +516,123 @@ public struct PaymentSheetSession: Sendable, Equatable {
     }
 }
 
+/// Client-safe Order snapshot carried by Checkout lifecycle events.
+public struct CheckoutOrder: Sendable, Equatable {
+    /// Stable Order states shared by web and mobile Checkout SDKs.
+    public enum Status: String, Sendable {
+        case requiresPayment = "requires_payment"
+        case requiresAction = "requires_action"
+        case processing
+        case paid
+        case failed
+        case expired
+        case canceled
+    }
+
+    public struct Merchant: Sendable, Equatable {
+        public let displayName: String
+    }
+
+    public struct Money: Sendable, Equatable {
+        public let value: Int
+        public let currency: String
+    }
+
+    public struct LineItem: Sendable, Equatable, Identifiable {
+        public let id: String
+        public let name: String
+        public let quantity: Int?
+        public let total: Money
+    }
+
+    public struct Documents: Sendable, Equatable {
+        public let invoiceURL: URL?
+        public let receiptURL: URL?
+    }
+
+    public let id: String
+    public let status: Status
+    public let merchant: Merchant
+    public let amount: Money
+    public let expiresAt: Date?
+    public let lineItems: [LineItem]
+    public let documents: Documents
+
+    init(
+        session: PaymentSheetSession,
+        status: Status,
+        documents: PaymentSheetSession.Documents? = nil
+    ) {
+        let resolvedDocuments = documents ?? session.documents
+        id = session.id
+        self.status = status
+        merchant = .init(displayName: session.merchant.displayName)
+        amount = .init(value: session.amount.value, currency: session.amount.currency)
+        expiresAt = session.expiresAt
+        lineItems = session.lineItems.map {
+            .init(
+                id: $0.id,
+                name: $0.name,
+                quantity: $0.quantity,
+                total: .init(value: $0.total.value, currency: $0.total.currency)
+            )
+        }
+        self.documents = .init(
+            invoiceURL: resolvedDocuments.invoiceURL,
+            receiptURL: resolvedDocuments.receiptURL
+        )
+    }
+}
+
+/// Sanitized payer action carried by `paymentActionRequired`.
+public struct CheckoutAction: Sendable, Equatable {
+    public enum Kind: String, Sendable {
+        case confirmation
+        case authorization
+        case redirect
+    }
+
+    public let type: Kind
+    public let expiresAt: Date?
+}
+
+/// Sanitized failure carried by public Checkout lifecycle events.
+public struct CheckoutFailure: Sendable, Equatable {
+    public let code: String
+    public let message: String
+    public let recoverable: Bool
+}
+
+/// One ordered, application-facing event from a Checkout presentation.
+public struct CheckoutEvent: Sendable, Equatable {
+    public enum Kind: String, Sendable {
+        case presented
+        case ready
+        case change
+        case orderPrepared
+        case paymentAttemptStarted
+        case paymentActionRequired
+        case paymentProcessing
+        case paymentAttemptFailed
+        case completed
+        case canceled
+        case failed
+    }
+
+    public let type: Kind
+    public let occurredAt: Date
+    public let flowID: String
+    public let sequence: Int
+    public let order: CheckoutOrder?
+    public let action: CheckoutAction?
+    public let failure: CheckoutFailure?
+    public let complete: Bool?
+    public let paymentMethod: String?
+}
+
+/// Receives ordered Checkout lifecycle events independently of diagnostics.
+public typealias CheckoutEventHandler = @Sendable (CheckoutEvent) -> Void
+
 /// Payer-supplied Mobile Money details for a new payment method.
 ///
 /// Account numbers are collected with the native segmented input and sent only
@@ -705,7 +822,7 @@ public enum PaymentSheetExternalAction: Sendable, Equatable {
 /// ``PaymentSheetResult`` for terminal presentation behavior.
 public enum PaymentSheetPaymentOutcome: Sendable, Equatable {
     /// Checkout reports payment completion and may provide document actions.
-    case completed(paymentID: String?, documents: PaymentSheetSession.Documents = .init())
+    case completed(documents: PaymentSheetSession.Documents = .init())
     /// The payer must enter a confirmation code inside the sheet.
     case requiresConfirmation(PaymentSheetConfirmationChallenge)
     /// Provider authorization or asynchronous processing is still outstanding.
@@ -719,11 +836,11 @@ public enum PaymentSheetPaymentOutcome: Sendable, Equatable {
 /// authoritative payment state.
 public enum PaymentSheetResult: Sendable, Equatable {
     /// The native experience reached its Checkout-confirmed success state.
-    case completed(paymentID: String?)
+    case completed(CheckoutEvent)
     /// The payer dismissed the sheet before completion.
-    case canceled
+    case canceled(CheckoutEvent)
     /// A terminal SDK or Checkout failure prevented the flow from continuing.
-    case failed(PaymentSheetFailure)
+    case failed(CheckoutEvent)
 }
 
 /// Stable, application-facing details for a terminal payment-sheet failure.

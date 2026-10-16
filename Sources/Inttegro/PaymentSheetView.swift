@@ -73,7 +73,7 @@ struct PaymentSheetView: View {
                         isRefreshing: isRefreshing,
                         failure: failure
                     )
-                case let .completed(session, _, documents):
+                case let .completed(session, documents):
                     completedView(session, documents: documents)
                 case let .failed(failure):
                     failureView(failure)
@@ -91,7 +91,7 @@ struct PaymentSheetView: View {
                 }
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Close", systemImage: "xmark") {
-                        onResult(model.completedResult ?? .canceled)
+                        onResult(model.dismissalResult())
                     }
                     .labelStyle(.iconOnly)
                     .disabled(model.isProcessing)

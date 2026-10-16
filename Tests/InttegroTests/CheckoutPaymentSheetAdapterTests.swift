@@ -282,7 +282,6 @@ struct CheckoutPaymentSheetAdapterTests {
         )
 
         #expect(outcome == .completed(
-            paymentID: "py_test",
             documents: .init(
                 invoiceURL: URL(string: "https://pages.inttegro.com/invoices/or_test/pdf"),
                 receiptURL: URL(string: "https://pages.inttegro.com/invoices/or_test/receipt")
@@ -365,7 +364,7 @@ struct CheckoutPaymentSheetAdapterTests {
             selection: .saved(method)
         )
 
-        #expect(outcome == .completed(paymentID: "py_test"))
+        #expect(outcome == .completed())
         let request = try #require(await transport.request(for: "/checkout/pay"))
         let key = try #require(request.value(forHTTPHeaderField: "Idempotency-Key"))
         #expect(UUID(uuidString: key) != nil)
@@ -528,7 +527,7 @@ struct CheckoutPaymentSheetAdapterTests {
 
         let outcome = try await adapter.pay(session: session, selection: .mobileMoney(input))
 
-        #expect(outcome == .completed(paymentID: "py_test"))
+        #expect(outcome == .completed())
         let request = try #require(await transport.request(for: "/checkout/pay"))
         let body = try #require(request.httpBody)
         let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
@@ -634,7 +633,7 @@ struct CheckoutPaymentSheetAdapterTests {
             token: "123456"
         )
 
-        #expect(outcome == .completed(paymentID: "py_test"))
+        #expect(outcome == .completed())
         let request = try #require(await transport.request(for: "/checkout/confirm_payment"))
         let body = try #require(request.httpBody)
         let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: String])
@@ -800,7 +799,7 @@ struct CheckoutPaymentSheetAdapterTests {
 
         let outcome = try await makeAdapter(transport).refreshPayment(session: session)
 
-        #expect(outcome == .completed(paymentID: "py_test"))
+        #expect(outcome == .completed())
         let request = try #require(await transport.request(for: "/checkout/lookup"))
         #expect(request.value(forHTTPHeaderField: "Idempotency-Key") == nil)
     }
@@ -839,7 +838,7 @@ struct CheckoutPaymentSheetAdapterTests {
 
         let outcome = try await adapter.pay(session: session, selection: .saved(method))
 
-        #expect(outcome == .completed(paymentID: "py_test"))
+        #expect(outcome == .completed())
         let keys = await transport.idempotencyKeys
         #expect(keys.count == 2)
         #expect(keys[0] == keys[1])

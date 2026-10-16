@@ -26,6 +26,7 @@ public final class PaymentSheet {
 
     private let configuration: PaymentSheetConfiguration
     private let adapter: any PaymentSheetAdapter
+    private let lifecycle: CheckoutLifecycle
     private let telemetry: PaymentSheetTelemetry
     private weak var presentedController: UIViewController?
     private var completion: Completion?
@@ -40,34 +41,47 @@ public final class PaymentSheet {
     ///   - configuration: Validated Checkout and presentation options.
     ///   - adapter: Transport and payment operations used by the state machine.
     ///   - telemetry: Optional shared telemetry source for host diagnostics.
+    ///   - eventHandler: Optional receiver for public Checkout lifecycle events.
     public init(
         configuration: PaymentSheetConfiguration,
         adapter: any PaymentSheetAdapter,
-        telemetry: PaymentSheetTelemetry? = nil
+        telemetry: PaymentSheetTelemetry? = nil,
+        eventHandler: CheckoutEventHandler? = nil
     ) {
         self.configuration = configuration
         self.adapter = adapter
-        self.telemetry = telemetry ?? PaymentSheetTelemetry(
+        let resolvedTelemetry = telemetry ?? PaymentSheetTelemetry(
             configuration: configuration.telemetry
+        )
+        self.telemetry = resolvedTelemetry
+        lifecycle = CheckoutLifecycle(
+            flowID: resolvedTelemetry.flowID,
+            eventHandler: eventHandler
         )
     }
 
     /// Creates a payment sheet backed by Inttegro's public Checkout endpoints.
     ///
-    /// This convenience initializer emits no host-observable events. Use
-    /// ``init(configuration:telemetryEventHandler:)`` to receive diagnostics.
+    /// This convenience initializer installs no host event handlers. Use
+    /// ``init(configuration:telemetryEventHandler:eventHandler:)`` to receive
+    /// diagnostics or public Checkout lifecycle events.
     public convenience init(configuration: PaymentSheetConfiguration) {
-        self.init(configuration: configuration, telemetryEventHandler: nil)
+        self.init(
+            configuration: configuration,
+            telemetryEventHandler: nil,
+            eventHandler: nil
+        )
     }
 
-    /// Creates a Checkout-backed sheet with an optional diagnostic event handler.
+    /// Creates a Checkout-backed sheet with optional lifecycle and diagnostic handlers.
     ///
     /// Inttegro installs no exporter. The handler receives privacy-safe events
     /// synchronously in emission order and should hand expensive work to the
     /// application's diagnostics pipeline.
     public convenience init(
         configuration: PaymentSheetConfiguration,
-        telemetryEventHandler: PaymentSheetTelemetry.EventHandler?
+        telemetryEventHandler: PaymentSheetTelemetry.EventHandler?,
+        eventHandler: CheckoutEventHandler? = nil
     ) {
         let telemetry = PaymentSheetTelemetry(
             configuration: configuration.telemetry,
@@ -76,7 +90,8 @@ public final class PaymentSheet {
         self.init(
             configuration: configuration,
             adapter: CheckoutPaymentSheetAdapter(telemetry: telemetry),
-            telemetry: telemetry
+            telemetry: telemetry,
+            eventHandler: eventHandler
         )
     }
 
@@ -94,13 +109,16 @@ public final class PaymentSheet {
         completion: @escaping Completion
     ) {
         guard presentedController == nil else {
-            completion(
-                .failed(
-                    PaymentSheetFailure(
-                        code: "payment_sheet_already_presented",
-                        message: "The payment sheet is already presented."
-                    )
+            let event = lifecycle.emit(
+                .failed,
+                failure: .init(
+                    code: "payment_sheet_already_presented",
+                    message: "The payment sheet is already presented.",
+                    recoverable: false
                 )
+            )
+            completion(
+                .failed(event)
             )
             return
         }
@@ -109,6 +127,7 @@ public final class PaymentSheet {
         let model = PaymentSheetViewModel(
             configuration: configuration,
             adapter: adapter,
+            lifecycle: lifecycle,
             telemetry: telemetry
         )
         let rootView = PaymentSheetView(model: model) { [weak self] result in
@@ -116,7 +135,7 @@ public final class PaymentSheet {
         }
         let controller = PaymentSheetHostingController(rootView: rootView)
         controller.onDismiss = { [weak self] in
-            self?.finish(with: .canceled, dismiss: false)
+            self?.finish(with: model.dismissalResult(), dismiss: false)
         }
         controller.modalPresentationStyle = .pageSheet
 
@@ -130,6 +149,7 @@ public final class PaymentSheet {
 
         presentedController = controller
         presentingViewController.present(controller, animated: true)
+        lifecycle.emit(.presented)
         telemetry.emit(.sheetPresented)
     }
 
@@ -140,10 +160,12 @@ public final class PaymentSheet {
             telemetry.emit(.sheetCompleted)
         case .canceled:
             telemetry.emit(.sheetCanceled)
-        case let .failed(failure):
+        case let .failed(event):
             telemetry.emit(
                 .sheetFailed,
-                errorType: PaymentSheetTelemetry.safeErrorType(failure.code)
+                errorType: PaymentSheetTelemetry.safeErrorType(
+                    event.failure?.code ?? "payment_sheet_failed"
+                )
             )
         }
         self.completion = nil

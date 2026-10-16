@@ -81,37 +81,42 @@ struct PaymentSheetBridgeTests {
 
     @Test("Encodes only terminal public results")
     func encodesResults() {
-        #expect(
-            NSDictionary(
-                dictionary: PaymentSheetResult.completed(
-                    paymentID: "py_test"
-                ).bridgePayload
-            ) == [
-                "status": "completed",
-                "paymentId": "py_test",
-            ] as NSDictionary
+        let session = PaymentSheetSession(
+            id: "or_test",
+            merchant: .init(displayName: "Acme"),
+            amount: .init(value: 1_500, currency: "ghs"),
+            paymentMethods: [],
+            expiresAt: Date(timeIntervalSince1970: 1_800_000_000)
         )
-        #expect(
-            NSDictionary(
-                dictionary: PaymentSheetResult.failed(
-                    .init(
-                        code: "declined",
-                        message: "Payment declined.",
-                        declineCode: "insufficient_funds",
-                        requestID: "req_test",
-                        retryAfterSeconds: 30
-                    )
-                ).bridgePayload
-            ) == [
-                "status": "failed",
-                "error": [
-                    "code": "declined",
-                    "message": "Payment declined.",
-                    "declineCode": "insufficient_funds",
-                    "requestId": "req_test",
-                    "retryAfterSeconds": 30,
-                ],
-            ] as NSDictionary
+        let lifecycle = CheckoutLifecycle(
+            flowID: "550e8400-e29b-41d4-a716-446655440000",
+            eventHandler: nil
         )
+        let completed = PaymentSheetResult.completed(
+            lifecycle.emit(
+                .completed,
+                order: CheckoutOrder(session: session, status: .paid)
+            )
+        ).bridgePayload
+        #expect(completed["type"] as? String == "completed")
+        #expect((completed["order"] as? [String: Any])?["id"] as? String == "or_test")
+
+        let failed = PaymentSheetResult.failed(
+            lifecycle.emit(
+                .failed,
+                order: CheckoutOrder(session: session, status: .failed),
+                failure: .init(
+                    code: "payment_failed",
+                    message: "Payment failed.",
+                    recoverable: false
+                )
+            )
+        ).bridgePayload
+        #expect(failed["type"] as? String == "failed")
+        #expect(
+            (failed["failure"] as? [String: Any])?["code"] as? String
+                == "payment_failed"
+        )
+        #expect((failed["failure"] as? [String: Any])?["recoverable"] as? Bool == false)
     }
 }

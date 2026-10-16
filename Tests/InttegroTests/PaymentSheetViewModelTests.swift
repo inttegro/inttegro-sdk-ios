@@ -294,7 +294,7 @@ struct PaymentSheetViewModelTests {
         let adapter = ViewModelAdapter(
             session: session(),
             payOutcome: .pending(action),
-            refreshOutcome: .completed(paymentID: "py_test")
+            refreshOutcome: .completed()
         )
         let model = PaymentSheetViewModel(
             configuration: try .init(orderID: "or_test"),
@@ -309,14 +309,22 @@ struct PaymentSheetViewModelTests {
             return
         }
         #expect(pendingAction == action)
-        #expect(await model.refreshPayment() == nil)
-        guard case let .completed(completedSession, paymentID, _) = model.state else {
+        let result = await model.refreshPayment()
+        guard case .completed? = result else {
+            Issue.record("Expected a completed terminal result")
+            return
+        }
+        guard case let .completed(completedSession, _) = model.state else {
             Issue.record("Expected the sheet to show payment completion")
             return
         }
         #expect(completedSession.id == "or_test")
-        #expect(paymentID == "py_test")
-        #expect(model.completedResult == .completed(paymentID: "py_test"))
+        guard case let .completed(event)? = model.completedResult else {
+            Issue.record("Expected a completed public result")
+            return
+        }
+        #expect(event.type == .completed)
+        #expect(event.order?.id == "or_test")
         #expect(await adapter.refreshCallCount == 1)
     }
 
@@ -358,6 +366,46 @@ struct PaymentSheetViewModelTests {
             .confirmationRequired,
             .authorizationRequired,
         ])
+    }
+
+    @Test("Emits canonical lifecycle events when telemetry is disabled")
+    @MainActor
+    func emitsLifecycleWithoutTelemetry() async throws {
+        let events = ViewModelLifecycleEventStore()
+        let telemetry = PaymentSheetTelemetry(
+            configuration: .init(enabled: false),
+            flowID: "550e8400-e29b-41d4-a716-446655440000",
+            eventHandler: nil
+        )
+        let lifecycle = CheckoutLifecycle(
+            flowID: telemetry.flowID,
+            eventHandler: events.append
+        )
+        let model = PaymentSheetViewModel(
+            configuration: try .init(orderID: "or_test"),
+            adapter: ViewModelAdapter(session: session()),
+            lifecycle: lifecycle,
+            telemetry: telemetry
+        )
+
+        await model.load()
+        model.mobileMoneyAccountNumber = "0244000042"
+        let result = await model.pay()
+
+        guard case .completed? = result else {
+            Issue.record("Expected a completed terminal result")
+            return
+        }
+        let snapshot = events.snapshot()
+        #expect(snapshot.map(\.type) == [
+            .ready,
+            .change,
+            .change,
+            .paymentAttemptStarted,
+            .completed,
+        ])
+        #expect(snapshot.map(\.sequence) == [1, 2, 3, 4, 5])
+        #expect(snapshot.last?.order?.id == "or_test")
     }
 
     private func session() -> PaymentSheetSession {
@@ -414,9 +462,9 @@ private actor ViewModelAdapter: PaymentSheetAdapter {
     init(
         session: PaymentSheetSession,
         amountSelection: PaymentSheetAmountSelection? = nil,
-        payOutcome: PaymentSheetPaymentOutcome = .completed(paymentID: "py_test"),
-        confirmOutcome: PaymentSheetPaymentOutcome = .completed(paymentID: "py_test"),
-        refreshOutcome: PaymentSheetPaymentOutcome = .completed(paymentID: "py_test")
+        payOutcome: PaymentSheetPaymentOutcome = .completed(),
+        confirmOutcome: PaymentSheetPaymentOutcome = .completed(),
+        refreshOutcome: PaymentSheetPaymentOutcome = .completed()
     ) {
         self.session = session
         self.amountSelection = amountSelection
@@ -498,6 +546,23 @@ private final class ViewModelTelemetryEventStore: @unchecked Sendable {
     }
 
     func snapshot() -> [PaymentSheetTelemetryEvent] {
+        lock.lock()
+        defer { lock.unlock() }
+        return events
+    }
+}
+
+private final class ViewModelLifecycleEventStore: @unchecked Sendable {
+    private let lock = NSLock()
+    private var events: [CheckoutEvent] = []
+
+    func append(_ event: CheckoutEvent) {
+        lock.lock()
+        events.append(event)
+        lock.unlock()
+    }
+
+    func snapshot() -> [CheckoutEvent] {
         lock.lock()
         defer { lock.unlock() }
         return events

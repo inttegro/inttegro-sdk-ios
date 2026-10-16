@@ -25,7 +25,6 @@ final class PaymentSheetViewModel: ObservableObject {
         )
         case completed(
             PaymentSheetSession,
-            paymentID: String?,
             documents: PaymentSheetSession.Documents
         )
         case failed(PaymentSheetFailure)
@@ -51,39 +50,55 @@ final class PaymentSheetViewModel: ObservableObject {
     @Published private(set) var state: State = .loading
     @Published private(set) var inlineFailure: PaymentSheetFailure?
     @Published private(set) var validationMessages: [Field: String] = [:]
-    @Published var selectedPaymentMethodID: String?
-    @Published private(set) var mobileMoneyNetwork: PaymentSheetMobileMoneyInput.Network?
+    @Published var selectedPaymentMethodID: String? {
+        didSet { emitChangeIfNeeded() }
+    }
+    @Published private(set) var mobileMoneyNetwork: PaymentSheetMobileMoneyInput.Network? {
+        didSet { emitChangeIfNeeded() }
+    }
     @Published private(set) var networkSelectorRevealed = false
     @Published var mobileMoneyAccountNumber = "" {
-        didSet { updateNetworkSuggestion() }
+        didSet {
+            updateNetworkSuggestion()
+            emitChangeIfNeeded()
+        }
     }
-    @Published var savePaymentMethod = false
-    @Published var billingName = ""
-    @Published var billingPhoneNumber = ""
-    @Published var billingLine1 = ""
-    @Published var billingLine2 = ""
-    @Published var billingCity = ""
-    @Published var billingRegion = ""
-    @Published var billingPostCode = ""
-    @Published var billingCountry = "GH"
+    @Published var savePaymentMethod = false { didSet { emitChangeIfNeeded() } }
+    @Published var billingName = "" { didSet { emitChangeIfNeeded() } }
+    @Published var billingPhoneNumber = "" { didSet { emitChangeIfNeeded() } }
+    @Published var billingLine1 = "" { didSet { emitChangeIfNeeded() } }
+    @Published var billingLine2 = "" { didSet { emitChangeIfNeeded() } }
+    @Published var billingCity = "" { didSet { emitChangeIfNeeded() } }
+    @Published var billingRegion = "" { didSet { emitChangeIfNeeded() } }
+    @Published var billingPostCode = "" { didSet { emitChangeIfNeeded() } }
+    @Published var billingCountry = "GH" { didSet { emitChangeIfNeeded() } }
     @Published var confirmationToken = ""
     @Published var selectedAmountValue = 0
 
     let configuration: PaymentSheetConfiguration
     private let adapter: any PaymentSheetAdapter
+    private let lifecycle: CheckoutLifecycle
     private let telemetry: PaymentSheetTelemetry
     private var amountOrderID: String?
     private var networkSelectionSource: NetworkSelectionSource?
+    private var terminalResult: PaymentSheetResult?
+    private var lastChangeComplete: Bool?
+    private var lastChangePaymentMethod: String?
 
     init(
         configuration: PaymentSheetConfiguration,
         adapter: any PaymentSheetAdapter,
+        lifecycle: CheckoutLifecycle? = nil,
         telemetry: PaymentSheetTelemetry? = nil
     ) {
         self.configuration = configuration
         self.adapter = adapter
         self.telemetry = telemetry ?? PaymentSheetTelemetry(
             configuration: configuration.telemetry
+        )
+        self.lifecycle = lifecycle ?? CheckoutLifecycle(
+            flowID: self.telemetry.flowID,
+            eventHandler: nil
         )
     }
 
@@ -116,7 +131,7 @@ final class PaymentSheetViewModel: ObservableObject {
             session
         case let .awaitingResult(session, _, _, _):
             session
-        case let .completed(session, _, _):
+        case let .completed(session, _):
             session
         case .loading, .amountSelection, .failed:
             nil
@@ -124,8 +139,17 @@ final class PaymentSheetViewModel: ObservableObject {
     }
 
     var completedResult: PaymentSheetResult? {
-        guard case let .completed(_, paymentID, _) = state else { return nil }
-        return .completed(paymentID: paymentID)
+        guard let terminalResult else { return nil }
+        if case .completed = terminalResult { return terminalResult }
+        return nil
+    }
+
+    func dismissalResult() -> PaymentSheetResult {
+        if let terminalResult { return terminalResult }
+        let event = lifecycle.emit(.canceled, order: currentCheckoutOrder())
+        let result = PaymentSheetResult.canceled(event)
+        terminalResult = result
+        return result
     }
 
     var canSelectAmount: Bool {
@@ -204,6 +228,8 @@ final class PaymentSheetViewModel: ObservableObject {
         inlineFailure = nil
         validationMessages = [:]
         amountOrderID = nil
+        lastChangeComplete = nil
+        lastChangePaymentMethod = nil
         do {
             if let purchaseIntentID = configuration.purchaseIntentID {
                 let selection = try await adapter.retrieveAmountSelection(
@@ -221,6 +247,8 @@ final class PaymentSheetViewModel: ObservableObject {
                     failure: nil
                 )
                 telemetry.emit(.checkoutLoadSucceeded)
+                lifecycle.emit(.ready)
+                emitChangeIfNeeded()
                 return
             }
             guard let orderID = configuration.orderID else {
@@ -235,6 +263,8 @@ final class PaymentSheetViewModel: ObservableObject {
             selectedPaymentMethodID = session.paymentMethods.first?.id
             state = .ready(session)
             telemetry.emit(.checkoutLoadSucceeded)
+            lifecycle.emit(.ready)
+            emitChangeIfNeeded()
         } catch {
             let failure = Self.failure(from: error)
             state = .failed(failure)
@@ -242,6 +272,11 @@ final class PaymentSheetViewModel: ObservableObject {
                 .checkoutLoadFailed,
                 errorType: PaymentSheetTelemetry.safeErrorType(failure.code)
             )
+            let event = lifecycle.emit(
+                .failed,
+                failure: failure.checkoutFailure(recoverable: false)
+            )
+            terminalResult = .failed(event)
         }
     }
 
@@ -249,6 +284,7 @@ final class PaymentSheetViewModel: ObservableObject {
         selectedAmountValue = value
         if case let .amountSelection(selection, _, _) = state {
             state = .amountSelection(selection, isProcessing: false, failure: nil)
+            emitChangeIfNeeded()
         }
     }
 
@@ -292,6 +328,11 @@ final class PaymentSheetViewModel: ObservableObject {
             amountOrderID = session.id
             selectedPaymentMethodID = session.paymentMethods.first?.id
             state = .ready(session)
+            lifecycle.emit(
+                .orderPrepared,
+                order: CheckoutOrder(session: session, status: .requiresPayment)
+            )
+            emitChangeIfNeeded()
         } catch {
             state = .amountSelection(
                 selection,
@@ -327,6 +368,10 @@ final class PaymentSheetViewModel: ObservableObject {
         inlineFailure = nil
         state = .processing(session)
         telemetry.emit(.paymentAttemptStarted)
+        lifecycle.emit(
+            .paymentAttemptStarted,
+            order: CheckoutOrder(session: session, status: .requiresPayment)
+        )
         do {
             let outcome = try await adapter.pay(session: session, selection: selection)
             return handle(outcome, session: session)
@@ -337,6 +382,11 @@ final class PaymentSheetViewModel: ObservableObject {
             telemetry.emit(
                 .paymentAttemptFailed,
                 errorType: PaymentSheetTelemetry.safeErrorType(failure.code)
+            )
+            lifecycle.emit(
+                .paymentAttemptFailed,
+                order: CheckoutOrder(session: session, status: .requiresPayment),
+                failure: failure.checkoutFailure(recoverable: true)
             )
             return nil
         }
@@ -510,6 +560,33 @@ final class PaymentSheetViewModel: ObservableObject {
         }
     }
 
+    private func emitChangeIfNeeded() {
+        let complete: Bool
+        let paymentMethod: String?
+        switch state {
+        case .amountSelection:
+            complete = canSelectAmount
+            paymentMethod = nil
+        case .ready:
+            complete = canPay
+            paymentMethod = selectedMethod?.kind == .mobileMoney
+                ? "mobile_money"
+                : nil
+        default:
+            return
+        }
+        guard complete != lastChangeComplete || paymentMethod != lastChangePaymentMethod else {
+            return
+        }
+        lastChangeComplete = complete
+        lastChangePaymentMethod = paymentMethod
+        lifecycle.emit(
+            .change,
+            complete: complete,
+            paymentMethod: paymentMethod
+        )
+    }
+
     private static func inferMobileMoneyNetwork(
         from digits: String
     ) -> PaymentSheetMobileMoneyInput.Network? {
@@ -527,13 +604,23 @@ final class PaymentSheetViewModel: ObservableObject {
         session: PaymentSheetSession
     ) -> PaymentSheetResult? {
         switch outcome {
-        case let .completed(paymentID, documents):
+        case let .completed(documents):
+            let resolvedDocuments = session.documents.merging(documents)
             state = .completed(
                 session,
-                paymentID: paymentID,
-                documents: session.documents.merging(documents)
+                documents: resolvedDocuments
             )
-            return nil
+            let event = lifecycle.emit(
+                .completed,
+                order: CheckoutOrder(
+                    session: session,
+                    status: .paid,
+                    documents: resolvedDocuments
+                )
+            )
+            let result = PaymentSheetResult.completed(event)
+            terminalResult = result
+            return result
         case let .requiresConfirmation(challenge):
             telemetry.emit(.confirmationRequired)
             confirmationToken = ""
@@ -544,6 +631,11 @@ final class PaymentSheetViewModel: ObservableObject {
                 isProcessing: false,
                 failure: nil
             )
+            lifecycle.emit(
+                .paymentActionRequired,
+                order: CheckoutOrder(session: session, status: .requiresAction),
+                action: .init(type: .confirmation, expiresAt: challenge.expiresAt)
+            )
             return nil
         case let .pending(action):
             telemetry.emit(.authorizationRequired)
@@ -553,8 +645,37 @@ final class PaymentSheetViewModel: ObservableObject {
                 isRefreshing: false,
                 failure: nil
             )
+            if let action {
+                lifecycle.emit(
+                    .paymentActionRequired,
+                    order: CheckoutOrder(session: session, status: .requiresAction),
+                    action: action.checkoutAction
+                )
+            } else {
+                lifecycle.emit(
+                    .paymentProcessing,
+                    order: CheckoutOrder(session: session, status: .processing)
+                )
+            }
             return nil
         }
+    }
+
+    private func currentCheckoutOrder() -> CheckoutOrder? {
+        guard let session = currentSession else { return nil }
+        let status: CheckoutOrder.Status = switch state {
+        case .processing:
+            .processing
+        case .confirmation, .awaitingResult:
+            .requiresAction
+        case .completed:
+            .paid
+        case .ready:
+            .requiresPayment
+        case .loading, .amountSelection, .failed:
+            .requiresPayment
+        }
+        return CheckoutOrder(session: session, status: status)
     }
 
     private static func failure(from error: Error) -> PaymentSheetFailure {
@@ -577,6 +698,17 @@ final class PaymentSheetViewModel: ObservableObject {
             code: "payment_sheet_failed",
             message: error.localizedDescription
         )
+    }
+}
+
+private extension PaymentSheetExternalAction {
+    var checkoutAction: CheckoutAction {
+        switch self {
+        case let .redirect(_, expiresAt):
+            .init(type: .redirect, expiresAt: expiresAt)
+        case let .authorize(_, expiresAt):
+            .init(type: .authorization, expiresAt: expiresAt)
+        }
     }
 }
 

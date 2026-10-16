@@ -138,7 +138,7 @@ public struct PreviewPaymentSheetAdapter: PaymentSheetAdapter {
         selection _: PaymentSheetPaymentSelection
     ) async throws -> PaymentSheetPaymentOutcome {
         try await Task.sleep(for: .milliseconds(650))
-        return .completed(paymentID: "py_preview")
+        return .completed()
     }
 
     public func requestConfirmation(
@@ -155,13 +155,13 @@ public struct PreviewPaymentSheetAdapter: PaymentSheetAdapter {
         token _: String
     ) async throws -> PaymentSheetPaymentOutcome {
         try await Task.sleep(for: .milliseconds(650))
-        return .completed(paymentID: "py_preview")
+        return .completed()
     }
 
     public func refreshPayment(
         session _: PaymentSheetSession
     ) async throws -> PaymentSheetPaymentOutcome {
-        return .completed(paymentID: "py_preview")
+        return .completed()
     }
 }
 

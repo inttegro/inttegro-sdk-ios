@@ -7,7 +7,7 @@ import SwiftUI
 ///
 /// Use this view when your application owns sheet presentation. For a concise
 /// binding-based API, apply
-/// ``inttegroPaymentSheet(isPresented:configuration:telemetryEventHandler:onCompletion:)``
+/// ``inttegroPaymentSheet(isPresented:configuration:telemetryEventHandler:eventHandler:onCompletion:)``
 /// to the presenting view instead.
 @MainActor
 public struct InttegroPaymentSheet: View {
@@ -15,6 +15,7 @@ public struct InttegroPaymentSheet: View {
     @State private var didReportPresentation = false
     @State private var didReportTerminalResult = false
     @State private var telemetry: PaymentSheetTelemetry
+    private let lifecycle: CheckoutLifecycle
     private let onCompletion: (PaymentSheetResult) -> Void
 
     /// Creates Checkout-backed payment content for a SwiftUI sheet.
@@ -22,24 +23,32 @@ public struct InttegroPaymentSheet: View {
     /// - Parameters:
     ///   - configuration: Validated Checkout and presentation options.
     ///   - telemetryEventHandler: Optional host-owned diagnostic receiver.
+    ///   - eventHandler: Optional receiver for public Checkout lifecycle events.
     ///   - onCompletion: Called once with the terminal presentation result.
     public init(
         configuration: PaymentSheetConfiguration,
         telemetryEventHandler: PaymentSheetTelemetry.EventHandler? = nil,
+        eventHandler: CheckoutEventHandler? = nil,
         onCompletion: @escaping (PaymentSheetResult) -> Void
     ) {
         let telemetry = PaymentSheetTelemetry(
             configuration: configuration.telemetry,
             eventHandler: telemetryEventHandler
         )
+        let lifecycle = CheckoutLifecycle(
+            flowID: telemetry.flowID,
+            eventHandler: eventHandler
+        )
         _model = StateObject(
             wrappedValue: PaymentSheetViewModel(
                 configuration: configuration,
                 adapter: CheckoutPaymentSheetAdapter(telemetry: telemetry),
+                lifecycle: lifecycle,
                 telemetry: telemetry
             )
         )
         _telemetry = State(initialValue: telemetry)
+        self.lifecycle = lifecycle
         self.onCompletion = onCompletion
     }
 
@@ -53,24 +62,32 @@ public struct InttegroPaymentSheet: View {
     ///   - configuration: Validated Checkout and presentation options.
     ///   - adapter: Transport and operations used by the payment state machine.
     ///   - telemetry: Optional shared diagnostic source.
+    ///   - eventHandler: Optional receiver for public Checkout lifecycle events.
     ///   - onCompletion: Called once with the terminal presentation result.
     public init(
         configuration: PaymentSheetConfiguration,
         adapter: any PaymentSheetAdapter,
         telemetry: PaymentSheetTelemetry? = nil,
+        eventHandler: CheckoutEventHandler? = nil,
         onCompletion: @escaping (PaymentSheetResult) -> Void
     ) {
         let resolvedTelemetry = telemetry ?? PaymentSheetTelemetry(
             configuration: configuration.telemetry
         )
+        let lifecycle = CheckoutLifecycle(
+            flowID: resolvedTelemetry.flowID,
+            eventHandler: eventHandler
+        )
         _model = StateObject(
             wrappedValue: PaymentSheetViewModel(
                 configuration: configuration,
                 adapter: adapter,
+                lifecycle: lifecycle,
                 telemetry: resolvedTelemetry
             )
         )
         _telemetry = State(initialValue: resolvedTelemetry)
+        self.lifecycle = lifecycle
         self.onCompletion = onCompletion
     }
 
@@ -79,6 +96,7 @@ public struct InttegroPaymentSheet: View {
             .onAppear {
                 guard !didReportPresentation else { return }
                 didReportPresentation = true
+                lifecycle.emit(.presented)
                 telemetry.emit(.sheetPresented)
             }
     }
@@ -91,10 +109,12 @@ public struct InttegroPaymentSheet: View {
             telemetry.emit(.sheetCompleted)
         case .canceled:
             telemetry.emit(.sheetCanceled)
-        case let .failed(failure):
+        case let .failed(event):
             telemetry.emit(
                 .sheetFailed,
-                errorType: PaymentSheetTelemetry.safeErrorType(failure.code)
+                errorType: PaymentSheetTelemetry.safeErrorType(
+                    event.failure?.code ?? "payment_sheet_failed"
+                )
             )
         }
         onCompletion(result)
@@ -113,17 +133,20 @@ public extension View {
     ///   - isPresented: Binding that controls native sheet presentation.
     ///   - configuration: Validated Checkout and presentation options.
     ///   - telemetryEventHandler: Optional host-owned diagnostic receiver.
+    ///   - eventHandler: Optional receiver for public Checkout lifecycle events.
     ///   - onCompletion: Called once with the terminal presentation result.
     func inttegroPaymentSheet(
         isPresented: Binding<Bool>,
         configuration: PaymentSheetConfiguration,
         telemetryEventHandler: PaymentSheetTelemetry.EventHandler? = nil,
+        eventHandler: CheckoutEventHandler? = nil,
         onCompletion: @escaping (PaymentSheetResult) -> Void
     ) -> some View {
         sheet(isPresented: isPresented) {
             InttegroPaymentSheet(
                 configuration: configuration,
-                telemetryEventHandler: telemetryEventHandler
+                telemetryEventHandler: telemetryEventHandler,
+                eventHandler: eventHandler
             ) { result in
                 isPresented.wrappedValue = false
                 onCompletion(result)

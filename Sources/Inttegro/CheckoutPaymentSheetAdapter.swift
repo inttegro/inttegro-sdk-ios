@@ -272,7 +272,6 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
 
         if order.status == "paid" || order.status == "completed" || order.payment?.status == "paid" {
             return .completed(
-                paymentID: order.payment?.id,
                 documents: order.paymentSheetDocuments
             )
         }
@@ -372,7 +371,7 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("inttegro-sdk-ios/0.3.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("inttegro-sdk-ios/0.4.1", forHTTPHeaderField: "User-Agent")
         telemetry?.applyTraceContext(to: &request)
         if let idempotencyKey {
             request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
@@ -496,7 +495,7 @@ private actor PaymentAttemptKeys {
 }
 
 private struct CheckoutEnvelope: Decodable {
-    let order: CheckoutOrder?
+    let order: CheckoutOrderResponse?
     let purchaseIntent: CheckoutPurchaseIntent?
     let error: CheckoutAPIError?
     var metadata = CheckoutResponseMetadata()
@@ -591,7 +590,7 @@ private struct CheckoutPurchaseIntent: Decodable {
                         recommended: $0.recommended == true
                     )
                 } ?? [],
-                expiresAt: CheckoutOrder.date(from: expiresAt)
+                expiresAt: CheckoutOrderResponse.date(from: expiresAt)
             )
         }
     }
@@ -619,7 +618,7 @@ private struct CheckoutResponseMetadata: Sendable {
     }
 }
 
-private struct CheckoutOrder: Decodable {
+private struct CheckoutOrderResponse: Decodable {
     let id: String
     let status: String
     let expiresAt: String?
@@ -885,7 +884,6 @@ private struct CheckoutOrder: Decodable {
 
     struct DocumentFormat: Decodable {
         let pdf: DocumentLink?
-        let receipt: DocumentLink?
     }
 
     struct DocumentLink: Decodable {
@@ -895,10 +893,7 @@ private struct CheckoutOrder: Decodable {
     var paymentSheetDocuments: PaymentSheetSession.Documents {
         .init(
             invoiceURL: Self.httpsURL(from: invoice?.format?.pdf?.url),
-            receiptURL: Self.httpsURL(
-                from: payment?.receipt?.format?.pdf?.url
-                    ?? invoice?.format?.receipt?.url
-            )
+            receiptURL: Self.httpsURL(from: payment?.receipt?.format?.pdf?.url)
         )
     }
 
@@ -1040,7 +1035,7 @@ private struct CheckoutOrder: Decodable {
     }
 }
 
-private extension CheckoutOrder.PaymentMethod {
+private extension CheckoutOrderResponse.PaymentMethod {
     var paymentSheetMethod: PaymentSheetSession.PaymentMethod {
         get throws {
             switch type {
