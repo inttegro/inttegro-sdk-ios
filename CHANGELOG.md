@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.1 - 2026-10-16
+
+- Align Swift with the canonical Checkout lifecycle shared by Inttegro's web
+  and mobile SDKs.
+- Return the terminal lifecycle event from payment-sheet presentation and
+  include the client-safe Order snapshot when Checkout completes.
+- Publish explicit payment-action, processing, recoverable-attempt-failure,
+  cancellation, and terminal-failure events with sanitized payloads.
+- Keep application lifecycle delivery independent of optional diagnostic
+  telemetry.
+- Report the installed iOS SDK version correctly in Checkout requests.
+
 ## 0.3.0 - 2026-10-03
 
 - Retry a transient Checkout mutation once after the server-directed delay while

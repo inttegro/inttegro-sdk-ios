@@ -1,6 +1,6 @@
 Pod::Spec.new do |spec|
   spec.name = 'Inttegro'
-  spec.version = '0.3.0'
+  spec.version = '0.4.1'
   spec.summary = 'Native Inttegro checkout and payment sheet for iOS.'
   spec.homepage = 'https://inttegro.com'
   spec.license = { type: 'MIT' }

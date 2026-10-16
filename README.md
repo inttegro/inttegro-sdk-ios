@@ -1,6 +1,6 @@
 # Inttegro SDK for iOS
 
-[API reference](https://mobile.inttegro.dev/v0.3.0/ios/documentation/inttegro/) ·
+[API reference](https://mobile.inttegro.dev/v0.4.1/ios/documentation/inttegro/) ·
 [Studio guide](https://studio.inttegro.com/mobile/ios)
 
 Present native Inttegro Checkout without sending secret API keys through your
@@ -20,7 +20,7 @@ Or add Inttegro to your package manifest:
 dependencies: [
     .package(
         url: "https://github.com/inttegro/inttegro-sdk-ios.git",
-        from: "0.3.0"
+        from: "0.4.1"
     ),
 ]
 ```
@@ -92,10 +92,35 @@ waiting state while it refreshes the public Checkout projection. A response
 that needs an unsupported action or is still processing is never reported as a
 completed payment.
 
+## Checkout lifecycle
+
+Pass `eventHandler` for application behavior and use the completion callback
+for the one terminal event. The lifecycle matches Inttegro's web, Android,
+React Native, and Flutter SDKs; a completed result contains the full client-safe
+Order snapshot rather than a Payment ID.
+
+```swift
+let sheet = PaymentSheet(
+    configuration: configuration,
+    telemetryEventHandler: nil,
+    eventHandler: handleCheckoutEvent
+)
+sheet.present(from: viewController) { result in
+    if case let .completed(event) = result {
+        verifyOrderFromBackend(event.order!.id)
+    }
+}
+```
+
+Each event includes `occurredAt`, `flowID`, and a monotonic `sequence` for the
+presentation. Order-backed events include a client-safe `order`; action and
+failure events add sanitized `action` or `failure` values. Lifecycle delivery
+does not depend on telemetry being enabled.
+
 ## Telemetry
 
-UIKit hosts can receive the same ordered lifecycle and network event stream as
-the cross-platform SDKs:
+UIKit hosts can receive diagnostic and network events separately from the
+Checkout lifecycle:
 
 ```swift
 let configuration = try PaymentSheetConfiguration(
@@ -120,5 +145,5 @@ contain Order or Payment IDs, customer or payer data, payment-method details,
 bodies, redirect URLs, or raw error messages.
 
 Checkout mutations honor a valid `Retry-After` response once while preserving
-the original idempotency key. A terminal `PaymentSheetFailure` can include
-`requestID` and `retryAfterSeconds` for support correlation and retry UX.
+the original idempotency key. Diagnostic events can include `requestID` and
+`retryAfterSeconds` for support correlation and retry UX.
