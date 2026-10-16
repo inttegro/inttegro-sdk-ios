@@ -42,7 +42,7 @@ do not place the payment content inside another independently scrolling modal.
 
 Interactive dismissal is disabled while an authorization mutation is in
 flight. When dismissal is permitted, a downward gesture is reported as
-``PaymentSheetResult/canceled``.
+``PaymentSheetResult/canceled(_:)``.
 
 ## Return from another application
 
