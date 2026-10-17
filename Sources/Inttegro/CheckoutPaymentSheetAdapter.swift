@@ -415,7 +415,7 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("inttegro-sdk-ios/0.4.2", forHTTPHeaderField: "User-Agent")
+        request.setValue("inttegro-sdk-ios/0.4.3", forHTTPHeaderField: "User-Agent")
         telemetry?.applyTraceContext(to: &request)
         if let idempotencyKey {
             request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")

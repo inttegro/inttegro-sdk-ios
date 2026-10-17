@@ -46,6 +46,14 @@ struct PaymentSheetView: View {
         ) ?? .white
     }
 
+    private var preferredColorScheme: ColorScheme? {
+        switch model.configuration.appearance.theme {
+        case .light: .light
+        case .dark: .dark
+        case .system: nil
+        }
+    }
+
     var body: some View {
         NavigationStack {
             Group {
@@ -102,7 +110,7 @@ struct PaymentSheetView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
-                    Text("Payment")
+                    Text(model.configuration.title)
                         .font(.headline.weight(.regular))
                 }
                 ToolbarItem(placement: .topBarLeading) {
@@ -118,6 +126,7 @@ struct PaymentSheetView: View {
                 poweredByFooter
             }
         }
+        .preferredColorScheme(preferredColorScheme)
         .tint(primaryColor)
         .presentationDetents(
             [

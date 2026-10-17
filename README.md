@@ -1,6 +1,6 @@
 # Inttegro SDK for iOS
 
-[API reference](https://mobile.inttegro.dev/v0.4.2/ios/documentation/inttegro/) ·
+[API reference](https://mobile.inttegro.dev/v0.4.3/ios/documentation/inttegro/) ·
 [Studio guide](https://studio.inttegro.com/mobile/ios)
 
 Present native Inttegro Checkout without sending secret API keys through your
@@ -20,7 +20,7 @@ Or add Inttegro to your package manifest:
 dependencies: [
     .package(
         url: "https://github.com/inttegro/inttegro-sdk-ios.git",
-        from: "0.4.2"
+        from: "0.4.3"
     ),
 ]
 ```
@@ -80,7 +80,9 @@ when an attached payment method must not be replaced. Orders without an
 attached method still collect one.
 
 For a Buy link, initialize with
-`PaymentSheetConfiguration(purchaseIntentID:returnURL:appearance:telemetry:features:)`.
+`PaymentSheetConfiguration(purchaseIntentID:title:returnURL:appearance:telemetry:features:)`.
+Both Order and Purchase Intent configurations accept a visible `title` and an
+appearance theme of `.light`, `.dark`, or `.system`; `.system` is the default.
 The native sheet retrieves the authoritative product choices and lets the
 payer choose the variant, quantity, customer identity, and—when supported—
 amount. It calls `/checkout/pay` with the complete purchase and payment

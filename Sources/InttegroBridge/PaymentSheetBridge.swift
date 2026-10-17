@@ -182,6 +182,7 @@ extension PaymentSheetConfiguration {
         if let rawOrderID {
             try self.init(
                 orderID: rawOrderID,
+                title: try Self.bridgeTitle(payload["title"]),
                 returnURL: returnURL,
                 appearance: appearance,
                 telemetry: telemetry,
@@ -190,6 +191,7 @@ extension PaymentSheetConfiguration {
         } else {
             try self.init(
                 purchaseIntentID: rawPurchaseIntentID!,
+                title: try Self.bridgeTitle(payload["title"]),
                 returnURL: returnURL,
                 appearance: appearance,
                 telemetry: telemetry,
@@ -212,12 +214,32 @@ extension PaymentSheetConfiguration {
         } else {
             cornerRadius = nil
         }
+        let theme: Appearance.Theme
+        if let rawTheme = try bridgeString(payload, key: "theme") {
+            guard let parsedTheme = Appearance.Theme(rawValue: rawTheme) else {
+                throw PaymentSheetBridgeError(
+                    "appearance.theme must be light, dark, or system"
+                )
+            }
+            theme = parsedTheme
+        } else {
+            theme = .system
+        }
         return try .init(
+            theme: theme,
             primaryColor: bridgeString(payload, key: "primaryColor"),
             backgroundColor: bridgeString(payload, key: "backgroundColor"),
             textColor: bridgeString(payload, key: "textColor"),
             cornerRadius: cornerRadius
         )
+    }
+
+    private static func bridgeTitle(_ value: Any?) throws -> String {
+        guard let value else { return "Payment" }
+        guard let title = value as? String else {
+            throw PaymentSheetBridgeError("title must be a string")
+        }
+        return title
     }
 
     private static func bridgeTelemetry(_ value: Any?) throws -> Telemetry {

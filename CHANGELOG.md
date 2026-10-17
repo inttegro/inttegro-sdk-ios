@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.3 - 2026-10-17
+
+- Add configurable payment-sheet titles.
+- Support light, dark, and system appearance modes.
+
 ## 0.4.2 - 2026-10-17
 
 - Present fixed-price, customer-selected, and variant Buy-link choices natively.

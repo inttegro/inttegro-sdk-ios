@@ -126,6 +126,14 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
     /// native controls, accessibility behavior, layout, and state semantics even
     /// when colors or corner radius are customized.
     public struct Appearance: Sendable, Equatable {
+        public enum Theme: String, Sendable, Equatable {
+            case light
+            case dark
+            case system
+        }
+
+        /// Color-scheme behavior for the native payment sheet.
+        public var theme: Theme
         /// Primary action color as `#RRGGBB` or `#RRGGBBAA`.
         public var primaryColor: String?
         /// Sheet surface color as `#RRGGBB` or `#RRGGBBAA`.
@@ -138,16 +146,19 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
         /// Creates optional appearance overrides.
         ///
         /// - Parameters:
+        ///   - theme: Color scheme for this sheet. `.system` follows the device.
         ///   - primaryColor: Primary action color in hexadecimal notation.
         ///   - backgroundColor: Sheet surface color in hexadecimal notation.
         ///   - textColor: Primary foreground color in hexadecimal notation.
         ///   - cornerRadius: Sheet corner radius from `0` through `40` points.
         public init(
+            theme: Theme = .system,
             primaryColor: String? = nil,
             backgroundColor: String? = nil,
             textColor: String? = nil,
             cornerRadius: Double? = nil
         ) {
+            self.theme = theme
             self.primaryColor = primaryColor
             self.backgroundColor = backgroundColor
             self.textColor = textColor
@@ -159,6 +170,8 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
     public let orderID: String?
     /// Public Buy link that Checkout presents before creating its Order.
     public let purchaseIntentID: String?
+    /// Title displayed in the native payment sheet. Defaults to `Payment`.
+    public let title: String
     /// Application URL used when a provider returns control to the merchant app.
     public let returnURL: URL?
     /// Optional native appearance overrides.
@@ -172,6 +185,7 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
     ///
     /// - Parameters:
     ///   - orderID: Public ID of an Order created and finalized by the backend.
+    ///   - title: Visible payment-sheet heading. Defaults to `Payment`.
     ///   - returnURL: Absolute application URL for provider return flows.
     ///   - appearance: Restrained native appearance overrides.
     ///   - telemetry: Host-owned diagnostics and trace-context options.
@@ -181,6 +195,7 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
     ///   the requested corner radius is outside its supported range.
     public init(
         orderID: String,
+        title: String = "Payment",
         returnURL: URL? = nil,
         appearance: Appearance = .init(),
         telemetry: Telemetry = .init(),
@@ -193,6 +208,7 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
             )
         }
         try Self.validatePresentationOptions(
+            title: title,
             returnURL: returnURL,
             appearance: appearance,
             telemetry: telemetry
@@ -200,6 +216,7 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
 
         self.orderID = normalizedOrderID
         purchaseIntentID = nil
+        self.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         self.returnURL = returnURL
         self.appearance = appearance
         self.telemetry = telemetry
@@ -211,8 +228,17 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
     /// Checkout loads the authoritative product, price, variants, and quantity
     /// range. Inttegro creates the finalized Order only after the payer confirms
     /// those choices and supplies their identifying details.
+    ///
+    /// - Parameters:
+    ///   - purchaseIntentID: Public Buy link shown before its Order is created.
+    ///   - title: Visible payment-sheet heading. Defaults to `Payment`.
+    ///   - returnURL: Absolute application URL for provider return flows.
+    ///   - appearance: Restrained native appearance overrides.
+    ///   - telemetry: Host-owned diagnostics and trace-context options.
+    ///   - features: Optional content and post-payment actions.
     public init(
         purchaseIntentID: String,
+        title: String = "Payment",
         returnURL: URL? = nil,
         appearance: Appearance = .init(),
         telemetry: Telemetry = .init(),
@@ -226,6 +252,7 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
             )
         }
         try Self.validatePresentationOptions(
+            title: title,
             returnURL: returnURL,
             appearance: appearance,
             telemetry: telemetry
@@ -233,6 +260,7 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
 
         orderID = nil
         self.purchaseIntentID = normalizedPurchaseIntentID
+        self.title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         self.returnURL = returnURL
         self.appearance = appearance
         self.telemetry = telemetry
@@ -240,10 +268,17 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
     }
 
     private static func validatePresentationOptions(
+        title: String,
         returnURL: URL?,
         appearance: Appearance,
         telemetry: Telemetry
     ) throws {
+        let normalizedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedTitle.isEmpty, normalizedTitle.count <= 120 else {
+            throw PaymentSheetError.invalidConfiguration(
+                "title must be between 1 and 120 characters"
+            )
+        }
         if let cornerRadius = appearance.cornerRadius,
            !(0 ... 40).contains(cornerRadius) {
             throw PaymentSheetError.invalidConfiguration(

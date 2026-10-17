@@ -10,8 +10,10 @@ struct PaymentSheetBridgeTests {
         let configuration = try PaymentSheetConfiguration(
             bridgePayload: [
                 "orderId": "  or_test  ",
+                "title": "Complete contribution",
                 "returnURL": "merchant-app://inttegro-return",
                 "appearance": [
+                    "theme": "dark",
                     "primaryColor": "#112233",
                     "cornerRadius": 24,
                 ],
@@ -30,7 +32,9 @@ struct PaymentSheetBridgeTests {
         )
 
         #expect(configuration.orderID == "or_test")
+        #expect(configuration.title == "Complete contribution")
         #expect(configuration.returnURL?.absoluteString == "merchant-app://inttegro-return")
+        #expect(configuration.appearance.theme == .dark)
         #expect(configuration.appearance.primaryColor == "#112233")
         #expect(configuration.appearance.cornerRadius == 24)
         #expect(configuration.telemetry.enabled)
@@ -62,6 +66,18 @@ struct PaymentSheetBridgeTests {
                 bridgePayload: [
                     "orderId": "or_test",
                     "appearance": ["cornerRadius": "large"],
+                ] as NSDictionary
+            )
+        }
+    }
+
+    @Test("Rejects an unknown color scheme")
+    func rejectsUnknownTheme() {
+        #expect(throws: (any Error).self) {
+            _ = try PaymentSheetConfiguration(
+                bridgePayload: [
+                    "orderId": "or_test",
+                    "appearance": ["theme": "sepia"],
                 ] as NSDictionary
             )
         }
