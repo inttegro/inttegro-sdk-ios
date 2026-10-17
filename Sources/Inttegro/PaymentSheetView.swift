@@ -15,6 +15,9 @@ struct PaymentSheetView: View {
         case billingCity
         case billingRegion
         case billingPostCode
+        case purchaseName
+        case purchaseEmail
+        case purchasePhone
         case confirmationToken
     }
 
@@ -52,6 +55,19 @@ struct PaymentSheetView: View {
                 case let .amountSelection(selection, isProcessing, failure):
                     amountSelectionView(
                         selection,
+                        isProcessing: isProcessing,
+                        failure: failure
+                    )
+                case let .purchaseIntent(intent, isProcessing, failure):
+                    purchaseIntentView(
+                        intent,
+                        isProcessing: isProcessing,
+                        failure: failure
+                    )
+                case let .purchasePayment(intent, selection, isProcessing, failure):
+                    purchasePaymentView(
+                        intent,
+                        selection: selection,
                         isProcessing: isProcessing,
                         failure: failure
                     )
@@ -164,7 +180,7 @@ struct PaymentSheetView: View {
             return amountSuggestionsExpanded
                 ? Self.providerSelectionDetent
                 : .medium
-        case .confirmation:
+        case .purchaseIntent, .purchasePayment, .confirmation:
             return .large
         case .awaitingResult, .completed:
             return .medium
@@ -229,6 +245,289 @@ struct PaymentSheetView: View {
         }
         .padding(32)
         .accessibilityElement(children: .combine)
+    }
+
+    private func purchaseIntentView(
+        _ intent: PaymentSheetPurchaseIntent,
+        isProcessing: Bool,
+        failure: PaymentSheetFailure?
+    ) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(intent.merchantName)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    if let product = model.selectedPurchaseProduct {
+                        Text(product.name)
+                            .font(.title2.weight(.regular))
+                        if let about = product.about {
+                            Text(about)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+
+                if !intent.variantAxes.isEmpty {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(intent.variantAxes) { axis in
+                            purchaseVariantSelector(intent, axis: axis)
+                        }
+                    }
+                }
+
+                if let product = model.selectedPurchaseProduct {
+                    if let selection = product.amountSelection {
+                        purchaseAmountField(selection)
+                    } else if let amount = product.fixedAmount {
+                        HStack {
+                            Text("Price")
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text(amount.formatted)
+                                .font(.title3.monospacedDigit())
+                        }
+                        .accessibilityElement(children: .combine)
+                    }
+                }
+
+                if model.selectedPurchaseProduct?.amountSelection == nil,
+                   intent.maximumQuantity != intent.minimumQuantity {
+                    purchaseQuantitySelector(intent)
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Your details")
+                            .font(.headline.weight(.regular))
+                        Text("The merchant uses these details for this order.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    labeledField(
+                        "Full name",
+                        text: $model.purchaseCustomerName,
+                        field: .purchaseName,
+                        contentType: .name,
+                        isRequired: true
+                    )
+                    labeledField(
+                        "Email address",
+                        text: $model.purchaseCustomerEmail,
+                        field: .purchaseEmail,
+                        contentType: .emailAddress,
+                        keyboardType: .emailAddress,
+                        supportingText: "Email or phone required"
+                    )
+                    labeledField(
+                        "Phone number",
+                        text: $model.purchaseCustomerPhone,
+                        field: .purchasePhone,
+                        contentType: .telephoneNumber,
+                        keyboardType: .phonePad
+                    )
+                }
+
+                if let failure {
+                    inlineFailure(failure)
+                }
+
+                Button {
+                    Task { await model.continueWithPurchaseIntent() }
+                } label: {
+                    HStack {
+                        if isProcessing {
+                            ProgressView().tint(primaryButtonForegroundColor)
+                        }
+                        Text(purchaseContinueLabel)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 50)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(primaryColor)
+                .foregroundStyle(primaryButtonForegroundColor)
+                .disabled(!model.canContinuePurchaseIntent || isProcessing)
+            }
+            .padding(20)
+        }
+        .scrollDismissesKeyboard(.interactively)
+    }
+
+    private func purchasePaymentView(
+        _ intent: PaymentSheetPurchaseIntent,
+        selection: PaymentSheetPurchaseSelection,
+        isProcessing: Bool,
+        failure: PaymentSheetFailure?
+    ) -> some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(spacing: 8) {
+                        Text(intent.merchantName)
+                            .font(.subheadline.weight(.regular))
+                            .foregroundStyle(.secondary)
+                        if let amount = model.purchasePaymentAmount {
+                            Text(amount.formatted)
+                                .font(.system(.largeTitle, design: .rounded, weight: .regular))
+                                .contentTransition(.numericText())
+                        }
+                        if let product = intent.products.first(where: {
+                            $0.id == selection.productID
+                        }) {
+                            Text(product.name)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+
+                    Button("Change order details", systemImage: "chevron.backward") {
+                        model.editPurchaseIntent()
+                    }
+                    .disabled(isProcessing)
+
+                    Divider()
+
+                    Text("Pay with Mobile Money")
+                        .font(.headline.weight(.regular))
+                    mobileMoneyForm
+
+                    if let failure {
+                        inlineFailure(failure)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 16)
+                .padding(.bottom, 12)
+            }
+            .scrollDismissesKeyboard(.interactively)
+
+            VStack(alignment: .leading, spacing: 10) {
+                paymentConsent
+                if let amount = model.purchasePaymentAmount {
+                    payButton(amount: amount, isProcessing: isProcessing)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+        }
+    }
+
+    private func purchaseVariantSelector(
+        _ intent: PaymentSheetPurchaseIntent,
+        axis: PaymentSheetPurchaseIntent.VariantAxis
+    ) -> some View {
+        let values = Array(Set(intent.products.compactMap { $0.variantValues[axis.key] }))
+            .sorted()
+        let selectedValue = model.selectedPurchaseProduct?.variantValues[axis.key]
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(axis.label)
+                .font(.subheadline.weight(.regular))
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(values, id: \.self) { value in
+                        let selected = selectedValue == value
+                        Button(value) {
+                            model.selectPurchaseVariantValue(axisKey: axis.key, value: value)
+                        }
+                        .buttonStyle(.bordered)
+                        .tint(selected ? primaryColor : .secondary)
+                        .accessibilityAddTraits(selected ? .isSelected : [])
+                    }
+                }
+            }
+        }
+    }
+
+    private func purchaseAmountField(
+        _ selection: PaymentSheetAmountSelection
+    ) -> some View {
+        let fractionDigits = amountFractionDigits(for: selection.currency)
+        let scale = amountScale(for: selection.currency)
+        let amountBinding = Binding<Double>(
+            get: { Double(model.selectedAmountValue) / scale },
+            set: { model.chooseAmount(Int(($0 * scale).rounded())) }
+        )
+        return VStack(alignment: .leading, spacing: 8) {
+            Text("Amount")
+                .font(.subheadline.weight(.regular))
+            HStack(spacing: 10) {
+                Text(selection.currency)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                TextField(
+                    "0.00",
+                    value: amountBinding,
+                    format: .number.precision(.fractionLength(fractionDigits))
+                )
+                .keyboardType(.decimalPad)
+                .font(.title.monospacedDigit())
+                .focused($focusedField, equals: .amount)
+            }
+            .padding(.horizontal, 16)
+            .frame(minHeight: 64)
+            .background(.background, in: RoundedRectangle(cornerRadius: 14))
+            .overlay {
+                RoundedRectangle(cornerRadius: 14)
+                    .stroke(Color(uiColor: .separator), lineWidth: 0.5)
+            }
+            Text(amountRangeText(selection))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if !selection.suggestions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(selection.suggestions) { suggestion in
+                            amountSuggestionButton(suggestion, currency: selection.currency)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func purchaseQuantitySelector(
+        _ intent: PaymentSheetPurchaseIntent
+    ) -> some View {
+        HStack {
+            Text("Quantity")
+                .font(.subheadline.weight(.regular))
+            Spacer()
+            Button("Decrease", systemImage: "minus") {
+                model.changePurchaseQuantity(by: -1)
+            }
+            .labelStyle(.iconOnly)
+            .disabled(model.selectedPurchaseQuantity <= intent.minimumQuantity)
+            Text("\(model.selectedPurchaseQuantity)")
+                .font(.body.monospacedDigit())
+                .frame(minWidth: 32)
+                .accessibilityLabel("Quantity \(model.selectedPurchaseQuantity)")
+            Button("Increase", systemImage: "plus") {
+                model.changePurchaseQuantity(by: 1)
+            }
+            .labelStyle(.iconOnly)
+            .disabled(
+                intent.maximumQuantity.map {
+                    model.selectedPurchaseQuantity >= $0
+                } ?? false
+            )
+        }
+    }
+
+    private var purchaseContinueLabel: String {
+        guard let product = model.selectedPurchaseProduct else { return "Continue" }
+        if let selection = product.amountSelection {
+            return "Continue with \(selectedAmountText(selection))"
+        }
+        guard let amount = product.fixedAmount else { return "Continue" }
+        let total = PaymentSheetSession.Money(
+            value: amount.value * model.selectedPurchaseQuantity,
+            currency: amount.currency
+        )
+        return "Continue with \(total.formatted)"
     }
 
     private func amountSelectionView(
@@ -478,7 +777,7 @@ struct PaymentSheetView: View {
 
             VStack(alignment: .leading, spacing: 10) {
                 paymentConsent
-                payButton(session, isProcessing: isProcessing)
+                payButton(amount: session.amount, isProcessing: isProcessing)
             }
             .padding(.horizontal, 20)
             .padding(.vertical, usesCompactPresentation ? 10 : 12)
@@ -694,7 +993,10 @@ struct PaymentSheetView: View {
     }
 
     private var mobileMoneyForm: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        let merchantName = model.currentSession?.merchant.displayName
+            ?? model.purchaseMerchantName
+            ?? "this merchant"
+        return VStack(alignment: .leading, spacing: 16) {
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Text("Account number")
@@ -724,8 +1026,7 @@ struct PaymentSheetView: View {
                     Text("Save for next time")
                         .font(.body.weight(.regular))
                     Text(
-                        "Pay faster at "
-                            + "\(model.currentSession?.merchant.displayName ?? "this merchant")."
+                        "Pay faster at \(merchantName)."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -1481,7 +1782,7 @@ struct PaymentSheetView: View {
     }
 
     private func payButton(
-        _ session: PaymentSheetSession,
+        amount: PaymentSheetSession.Money,
         isProcessing: Bool
     ) -> some View {
         let isEnabled = !isProcessing && model.canPay
@@ -1502,7 +1803,7 @@ struct PaymentSheetView: View {
                     ProgressView()
                         .tint(primaryButtonForegroundColor)
                 }
-                Text(isProcessing ? "Starting payment" : "Pay \(session.amount.formatted)")
+                Text(isProcessing ? "Starting payment" : "Pay \(amount.formatted)")
                     .fontWeight(.regular)
                     .foregroundColor(
                         usesPrimaryStyle

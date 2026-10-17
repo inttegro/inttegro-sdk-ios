@@ -4,7 +4,80 @@ import Testing
 
 @Suite("Payment sheet view model")
 struct PaymentSheetViewModelTests {
-    @Test("Creates an Order after the payer chooses an amount")
+    @Test("Defers fixed-price Order creation until the payer pays")
+    @MainActor
+    func paysFixedPricePurchaseIntent() async throws {
+        let prepared = session()
+        let adapter = ViewModelAdapter(
+            session: prepared,
+            purchaseIntent: purchaseIntent()
+        )
+        let model = PaymentSheetViewModel(
+            configuration: try .init(purchaseIntentID: "sale_fixed"),
+            adapter: adapter
+        )
+
+        await model.load()
+
+        guard case .purchaseIntent = model.state else {
+            Issue.record("Expected Buy-link choices")
+            return
+        }
+        #expect(await adapter.purchasePayCallCount == 0)
+
+        model.purchaseCustomerName = "Ama Mensah"
+        model.purchaseCustomerEmail = "ama@example.com"
+        await model.continueWithPurchaseIntent()
+
+        guard case .purchasePayment = model.state else {
+            Issue.record("Expected local payment details after Continue")
+            return
+        }
+        #expect(await adapter.purchasePayCallCount == 0)
+
+        model.mobileMoneyAccountNumber = "0244000042"
+        let result = await model.pay()
+
+        guard case .completed = result else {
+            Issue.record("Expected completed payment")
+            return
+        }
+        #expect(await adapter.purchasePayCallCount == 1)
+        #expect(await adapter.purchaseSelection?.productID == "prod_fixed")
+    }
+
+    @Test("Keeps the created Order when the first Purchase Intent payment attempt fails")
+    @MainActor
+    func keepsCreatedOrderAfterPurchasePaymentFailure() async throws {
+        let adapter = ViewModelAdapter(
+            session: session(),
+            purchaseIntent: purchaseIntent(),
+            purchaseFailure: .init(
+                code: "payment_failed",
+                message: "The payment could not be completed."
+            )
+        )
+        let model = PaymentSheetViewModel(
+            configuration: try .init(purchaseIntentID: "sale_fixed"),
+            adapter: adapter
+        )
+
+        await model.load()
+        model.purchaseCustomerName = "Ama Mensah"
+        model.purchaseCustomerEmail = "ama@example.com"
+        await model.continueWithPurchaseIntent()
+        model.mobileMoneyAccountNumber = "0244000042"
+
+        #expect(await model.pay() == nil)
+        guard case .ready = model.state else {
+            Issue.record("Expected the created Order to remain ready for retry")
+            return
+        }
+        #expect(model.inlineFailure?.code == "payment_failed")
+        #expect(await adapter.purchasePayCallCount == 1)
+    }
+
+    @Test("Submits the chosen amount only when the payer pays")
     @MainActor
     func createsOrderForSelectedAmount() async throws {
         let selection = PaymentSheetAmountSelection(
@@ -28,9 +101,21 @@ struct PaymentSheetViewModelTests {
             maximum: selection.maximum,
             suggestions: selection.suggestions
         )
+        let intent = PaymentSheetPurchaseIntent(
+            id: "sale_test",
+            merchantName: selection.merchantName,
+            products: [
+                .init(
+                    id: "prod_test",
+                    name: selection.productName,
+                    amountSelection: selection
+                ),
+            ],
+            defaultProductID: "prod_test"
+        )
         let adapter = ViewModelAdapter(
             session: editableSession(selection: editableSelection),
-            amountSelection: selection
+            purchaseIntent: intent
         )
         let model = PaymentSheetViewModel(
             configuration: try .init(purchaseIntentID: "sale_test"),
@@ -38,35 +123,27 @@ struct PaymentSheetViewModelTests {
         )
 
         await model.load()
-        guard case .amountSelection = model.state else {
-            Issue.record("Expected amount selection")
+        guard case .purchaseIntent = model.state else {
+            Issue.record("Expected Buy-link amount selection")
             return
         }
         #expect(model.selectedAmountValue == 1_000)
 
         model.chooseAmount(1_250)
-        await model.continueWithSelectedAmount()
+        model.purchaseCustomerName = "Ama Mensah"
+        model.purchaseCustomerPhone = "0244000042"
+        await model.continueWithPurchaseIntent()
 
-        guard case .ready = model.state else {
-            Issue.record("Expected finalized Checkout")
+        guard case .purchasePayment = model.state else {
+            Issue.record("Expected local payment details")
             return
         }
-        #expect(await adapter.selectedAmount?.value == 1_250)
-        #expect(model.canChangeAmount)
+        #expect(await adapter.purchasePayCallCount == 0)
+        model.mobileMoneyAccountNumber = "0244000042"
+        _ = await model.pay()
 
-        model.editAmount(lineItemID: "li_selected")
-        guard case .amountSelection = model.state else {
-            Issue.record("Expected amount selection after editing")
-            return
-        }
-        model.chooseAmount(2_500)
-        await model.continueWithSelectedAmount()
-
-        guard case .ready = model.state else {
-            Issue.record("Expected updated Checkout")
-            return
-        }
-        #expect(await adapter.updatedAmount?.value == 2_500)
+        #expect(await adapter.purchasePayCallCount == 1)
+        #expect(await adapter.purchaseSelection?.selectedAmount?.value == 1_250)
     }
 
     @Test("Edits a customer-selected amount on a merchant-created Order")
@@ -125,7 +202,7 @@ struct PaymentSheetViewModelTests {
             return
         }
         #expect(await adapter.updatedAmount?.value == 2_500)
-        #expect(await adapter.selectedAmount == nil)
+        #expect(await adapter.purchaseSelection == nil)
     }
 
     @Test("Suggests a network and preserves a ported-number override")
@@ -425,6 +502,21 @@ struct PaymentSheetViewModelTests {
         )
     }
 
+    private func purchaseIntent() -> PaymentSheetPurchaseIntent {
+        PaymentSheetPurchaseIntent(
+            id: "sale_fixed",
+            merchantName: "Field & Form",
+            products: [
+                .init(
+                    id: "prod_fixed",
+                    name: "Woven basket",
+                    fixedAmount: .init(value: 12_500, currency: "GHS")
+                ),
+            ],
+            defaultProductID: "prod_fixed"
+        )
+    }
+
     private func editableSession(
         selection: PaymentSheetAmountSelection
     ) -> PaymentSheetSession {
@@ -449,49 +541,59 @@ struct PaymentSheetViewModelTests {
 
 private actor ViewModelAdapter: PaymentSheetAdapter {
     private let session: PaymentSheetSession
-    private let amountSelection: PaymentSheetAmountSelection?
+    private let purchaseIntent: PaymentSheetPurchaseIntent?
     private let payOutcome: PaymentSheetPaymentOutcome
     private let confirmOutcome: PaymentSheetPaymentOutcome
     private let refreshOutcome: PaymentSheetPaymentOutcome
+    private let purchaseFailure: PaymentSheetFailure?
     private(set) var payCallCount = 0
     private(set) var confirmCallCount = 0
     private(set) var refreshCallCount = 0
-    private(set) var selectedAmount: PaymentSheetSession.Money?
+    private(set) var purchasePayCallCount = 0
+    private(set) var purchaseSelection: PaymentSheetPurchaseSelection?
     private(set) var updatedAmount: PaymentSheetSession.Money?
 
     init(
         session: PaymentSheetSession,
-        amountSelection: PaymentSheetAmountSelection? = nil,
+        purchaseIntent: PaymentSheetPurchaseIntent? = nil,
         payOutcome: PaymentSheetPaymentOutcome = .completed(),
         confirmOutcome: PaymentSheetPaymentOutcome = .completed(),
-        refreshOutcome: PaymentSheetPaymentOutcome = .completed()
+        refreshOutcome: PaymentSheetPaymentOutcome = .completed(),
+        purchaseFailure: PaymentSheetFailure? = nil
     ) {
         self.session = session
-        self.amountSelection = amountSelection
+        self.purchaseIntent = purchaseIntent
         self.payOutcome = payOutcome
         self.confirmOutcome = confirmOutcome
         self.refreshOutcome = refreshOutcome
+        self.purchaseFailure = purchaseFailure
     }
 
     func retrieveCheckout(orderID _: String) async throws -> PaymentSheetSession {
         session
     }
 
-    func retrieveAmountSelection(
+    func retrievePurchaseIntent(
         purchaseIntentID _: String
-    ) async throws -> PaymentSheetAmountSelection {
-        guard let amountSelection else {
+    ) async throws -> PaymentSheetPurchaseIntent {
+        guard let purchaseIntent else {
             throw PaymentSheetError.checkoutUnavailable
         }
-        return amountSelection
+        return purchaseIntent
     }
 
-    func selectAmount(
+    func payPurchaseIntent(
         purchaseIntentID _: String,
-        amount: PaymentSheetSession.Money
-    ) async throws -> PaymentSheetSession {
-        selectedAmount = amount
-        return session
+        purchaseSelection: PaymentSheetPurchaseSelection,
+        paymentSelection _: PaymentSheetPaymentSelection
+    ) async throws -> PaymentSheetPurchasePaymentResult {
+        purchasePayCallCount += 1
+        self.purchaseSelection = purchaseSelection
+        return PaymentSheetPurchasePaymentResult(
+            session: session,
+            outcome: purchaseFailure == nil ? payOutcome : nil,
+            failure: purchaseFailure
+        )
     }
 
     func updateAmount(

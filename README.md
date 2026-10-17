@@ -1,6 +1,6 @@
 # Inttegro SDK for iOS
 
-[API reference](https://mobile.inttegro.dev/v0.4.1/ios/documentation/inttegro/) ·
+[API reference](https://mobile.inttegro.dev/v0.4.2/ios/documentation/inttegro/) ·
 [Studio guide](https://studio.inttegro.com/mobile/ios)
 
 Present native Inttegro Checkout without sending secret API keys through your
@@ -20,7 +20,7 @@ Or add Inttegro to your package manifest:
 dependencies: [
     .package(
         url: "https://github.com/inttegro/inttegro-sdk-ios.git",
-        from: "0.4.1"
+        from: "0.4.2"
     ),
 ]
 ```
@@ -65,8 +65,8 @@ deterministic demo adapter supplies non-sensitive checkout data and never sends
 a payment.
 
 Pass either the public Checkout Order ID created by your backend or a public
-Purchase Intent backed by a `customer_selected_amount` price. Never embed
-`INTTEGRO_API_KEY` in an iOS application. The default adapter retrieves the
+Purchase Intent from a Buy link. Never embed `INTTEGRO_API_KEY` in an iOS
+application. The default adapter retrieves the
 checkout from `https://api.inttegro.com/checkout/lookup` and submits a supported
 attached payment method or newly entered mobile-money details to `/checkout/pay`
 with an idempotency key. Optional billing details describe the payer; the SDK
@@ -79,11 +79,13 @@ default to off. `allowPaymentMethodChange` defaults to `true`; set it to `false`
 when an attached payment method must not be replaced. Orders without an
 attached method still collect one.
 
-For customer-selected amounts, initialize with
+For a Buy link, initialize with
 `PaymentSheetConfiguration(purchaseIntentID:returnURL:appearance:telemetry:features:)`.
-The native sheet renders the authoritative currency, range, and suggestions,
-then calls `/checkout/select_amount` with a stable idempotency key before
-continuing through the same payment states.
+The native sheet retrieves the authoritative product choices and lets the
+payer choose the variant, quantity, customer identity, and—when supported—
+amount. It calls `/checkout/pay` with the complete purchase and payment
+selection only when the payer presses Pay. Checkout creates the finalized Order
+and starts that payment attempt together under one stable idempotency key.
 
 The native sheet supports payer-supplied mobile-money and billing-detail forms,
 plus confirmation-code request and submission. HTTPS provider redirects open

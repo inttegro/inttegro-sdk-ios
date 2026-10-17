@@ -9,6 +9,17 @@ final class PaymentSheetViewModel: ObservableObject {
             isProcessing: Bool,
             failure: PaymentSheetFailure?
         )
+        case purchaseIntent(
+            PaymentSheetPurchaseIntent,
+            isProcessing: Bool,
+            failure: PaymentSheetFailure?
+        )
+        case purchasePayment(
+            PaymentSheetPurchaseIntent,
+            PaymentSheetPurchaseSelection,
+            isProcessing: Bool,
+            failure: PaymentSheetFailure?
+        )
         case ready(PaymentSheetSession)
         case processing(PaymentSheetSession)
         case confirmation(
@@ -40,6 +51,8 @@ final class PaymentSheetViewModel: ObservableObject {
         case billingPostCode
         case billingCountry
         case confirmationToken
+        case purchaseCustomerName
+        case purchaseCustomerContact
     }
 
     private enum NetworkSelectionSource {
@@ -74,6 +87,11 @@ final class PaymentSheetViewModel: ObservableObject {
     @Published var billingCountry = "GH" { didSet { emitChangeIfNeeded() } }
     @Published var confirmationToken = ""
     @Published var selectedAmountValue = 0
+    @Published private(set) var selectedPurchaseProductID: String?
+    @Published private(set) var selectedPurchaseQuantity = 1
+    @Published var purchaseCustomerName = "" { didSet { emitChangeIfNeeded() } }
+    @Published var purchaseCustomerEmail = "" { didSet { emitChangeIfNeeded() } }
+    @Published var purchaseCustomerPhone = "" { didSet { emitChangeIfNeeded() } }
 
     let configuration: PaymentSheetConfiguration
     private let adapter: any PaymentSheetAdapter
@@ -106,6 +124,8 @@ final class PaymentSheetViewModel: ObservableObject {
         switch state {
         case .processing,
              .amountSelection(_, isProcessing: true, failure: _),
+             .purchaseIntent(_, isProcessing: true, failure: _),
+             .purchasePayment(_, _, isProcessing: true, failure: _),
              .confirmation(_, _, isProcessing: true, failure: _):
             true
         default:
@@ -133,7 +153,7 @@ final class PaymentSheetViewModel: ObservableObject {
             session
         case let .completed(session, _):
             session
-        case .loading, .amountSelection, .failed:
+        case .loading, .amountSelection, .purchaseIntent, .purchasePayment, .failed:
             nil
         }
     }
@@ -165,15 +185,71 @@ final class PaymentSheetViewModel: ObservableObject {
         return session.lineItems.contains { $0.amountSelection != nil }
     }
 
-    var canPay: Bool {
-        guard let method = selectedMethod else { return false }
-        guard method.source == .new else { return true }
-        guard mobileMoneyAccountNumber.filter(\.isNumber).count == 10 else {
+    var selectedPurchaseProduct: PaymentSheetPurchaseIntent.Product? {
+        let intent: PaymentSheetPurchaseIntent
+        switch state {
+        case let .purchaseIntent(value, _, _), let .purchasePayment(value, _, _, _):
+            intent = value
+        default:
+            return nil
+        }
+        guard let selectedPurchaseProductID else { return nil }
+        return intent.products.first { $0.id == selectedPurchaseProductID }
+    }
+
+    var canContinuePurchaseIntent: Bool {
+        guard case let .purchaseIntent(intent, false, _) = state,
+              let product = selectedPurchaseProduct,
+              selectedPurchaseQuantity >= intent.minimumQuantity,
+              intent.maximumQuantity.map({ selectedPurchaseQuantity <= $0 }) ?? true,
+              purchaseCustomerName.trimmedOrNil != nil,
+              purchaseCustomerEmail.trimmedOrNil != nil
+                || purchaseCustomerPhone.trimmedOrNil != nil else {
             return false
         }
-        guard mobileMoneyNetwork != nil else { return false }
-        guard savePaymentMethod else { return true }
-        return paymentMethodOwnerReady
+        guard let amountSelection = product.amountSelection else { return true }
+        return selectedAmountValue >= amountSelection.minimum
+            && (amountSelection.maximum.map { selectedAmountValue <= $0 } ?? true)
+    }
+
+    var canPay: Bool {
+        if case .purchasePayment = state {
+            return mobileMoneyPaymentReady
+        }
+        guard let method = selectedMethod else { return false }
+        guard method.source == .new else { return true }
+        return mobileMoneyPaymentReady
+    }
+
+    private var mobileMoneyPaymentReady: Bool {
+        mobileMoneyAccountNumber.filter(\.isNumber).count == 10
+            && mobileMoneyNetwork != nil
+            && (!savePaymentMethod || paymentMethodOwnerReady)
+    }
+
+    var purchasePaymentAmount: PaymentSheetSession.Money? {
+        guard case let .purchasePayment(intent, selection, _, _) = state else {
+            return nil
+        }
+        if let selectedAmount = selection.selectedAmount { return selectedAmount }
+        guard let fixed = intent.products.first(where: {
+            $0.id == selection.productID
+        })?.fixedAmount else {
+            return nil
+        }
+        return .init(
+            value: fixed.value * selection.quantity,
+            currency: fixed.currency
+        )
+    }
+
+    var purchaseMerchantName: String? {
+        switch state {
+        case let .purchaseIntent(intent, _, _), let .purchasePayment(intent, _, _, _):
+            intent.merchantName
+        default:
+            nil
+        }
     }
 
     var networkSuggestionHint: String? {
@@ -230,22 +306,27 @@ final class PaymentSheetViewModel: ObservableObject {
         amountOrderID = nil
         lastChangeComplete = nil
         lastChangePaymentMethod = nil
+        selectedPurchaseProductID = nil
+        selectedPurchaseQuantity = 1
         do {
             if let purchaseIntentID = configuration.purchaseIntentID {
-                let selection = try await adapter.retrieveAmountSelection(
+                let intent = try await adapter.retrievePurchaseIntent(
                     purchaseIntentID: purchaseIntentID
                 )
-                if let expiresAt = selection.expiresAt, expiresAt <= Date() {
+                if let expiresAt = intent.expiresAt, expiresAt <= Date() {
                     throw PaymentSheetError.checkoutExpired
                 }
-                selectedAmountValue = selection.suggestions
-                    .first(where: \.recommended)?.value
-                    ?? selection.minimum
-                state = .amountSelection(
-                    selection,
-                    isProcessing: false,
-                    failure: nil
+                guard !intent.products.isEmpty else {
+                    throw PaymentSheetError.checkoutUnavailable
+                }
+                selectedPurchaseProductID = intent.products.contains {
+                    $0.id == intent.defaultProductID
+                } ? intent.defaultProductID : intent.products[0].id
+                selectedPurchaseQuantity = intent.minimumQuantity
+                initializeSelectedAmount(
+                    for: intent.products.first { $0.id == selectedPurchaseProductID }
                 )
+                state = .purchaseIntent(intent, isProcessing: false, failure: nil)
                 telemetry.emit(.checkoutLoadSucceeded)
                 lifecycle.emit(.ready)
                 emitChangeIfNeeded()
@@ -285,7 +366,86 @@ final class PaymentSheetViewModel: ObservableObject {
         if case let .amountSelection(selection, _, _) = state {
             state = .amountSelection(selection, isProcessing: false, failure: nil)
             emitChangeIfNeeded()
+        } else if case let .purchaseIntent(intent, _, _) = state {
+            state = .purchaseIntent(intent, isProcessing: false, failure: nil)
+            emitChangeIfNeeded()
         }
+    }
+
+    func selectPurchaseProduct(_ productID: String) {
+        guard case let .purchaseIntent(intent, false, _) = state,
+              intent.products.contains(where: { $0.id == productID }) else {
+            return
+        }
+        selectedPurchaseProductID = productID
+        initializeSelectedAmount(for: selectedPurchaseProduct)
+        state = .purchaseIntent(intent, isProcessing: false, failure: nil)
+        emitChangeIfNeeded()
+    }
+
+    func selectPurchaseVariantValue(axisKey: String, value: String) {
+        guard case let .purchaseIntent(intent, false, _) = state,
+              let selectedPurchaseProduct else {
+            return
+        }
+        var desiredValues = selectedPurchaseProduct.variantValues
+        desiredValues[axisKey] = value
+        let candidate = intent.products.first { product in
+            desiredValues.allSatisfy { key, value in
+                product.variantValues[key] == value
+            }
+        } ?? intent.products.first { $0.variantValues[axisKey] == value }
+        guard let candidate else { return }
+        selectPurchaseProduct(candidate.id)
+    }
+
+    func changePurchaseQuantity(by delta: Int) {
+        guard case let .purchaseIntent(intent, false, _) = state else { return }
+        let maximum = intent.maximumQuantity ?? Int.max
+        selectedPurchaseQuantity = min(
+            maximum,
+            max(intent.minimumQuantity, selectedPurchaseQuantity + delta)
+        )
+        emitChangeIfNeeded()
+    }
+
+    func continueWithPurchaseIntent() async {
+        guard case let .purchaseIntent(intent, false, _) = state,
+              canContinuePurchaseIntent,
+              let product = selectedPurchaseProduct,
+              let name = purchaseCustomerName.trimmedOrNil else {
+            return
+        }
+        let selectedAmount = product.amountSelection.map { selection in
+            PaymentSheetSession.Money(
+                value: selectedAmountValue,
+                currency: selection.currency
+            )
+        }
+        state = .purchasePayment(
+            intent,
+            .init(
+                productID: product.id,
+                quantity: product.amountSelection == nil ? selectedPurchaseQuantity : 1,
+                selectedAmount: selectedAmount,
+                customer: .init(
+                    name: name,
+                    emailAddress: purchaseCustomerEmail.trimmedOrNil,
+                    phoneNumber: purchaseCustomerPhone.trimmedOrNil
+                )
+            ),
+            isProcessing: false,
+            failure: nil
+        )
+        emitChangeIfNeeded()
+    }
+
+    func editPurchaseIntent() {
+        guard case let .purchasePayment(intent, _, false, _) = state else { return }
+        state = .purchaseIntent(intent, isProcessing: false, failure: nil)
+        inlineFailure = nil
+        validationMessages = [:]
+        emitChangeIfNeeded()
     }
 
     func continueWithSelectedAmount() async {
@@ -299,39 +459,21 @@ final class PaymentSheetViewModel: ObservableObject {
                 value: selectedAmountValue,
                 currency: selection.currency
             )
-            let session: PaymentSheetSession
-            if let amountOrderID {
-                guard let lineItemID = selection.lineItemID else {
-                    throw PaymentSheetError.invalidConfiguration(
-                        "The editable line item is missing."
-                    )
-                }
-                session = try await adapter.updateAmount(
-                    orderID: amountOrderID,
-                    lineItemID: lineItemID,
-                    amount: amount
-                )
-            } else {
-                guard let purchaseIntentID = selection.purchaseIntentID else {
-                    throw PaymentSheetError.invalidConfiguration(
-                        "A Purchase Intent ID is required to create this checkout."
-                    )
-                }
-                session = try await adapter.selectAmount(
-                    purchaseIntentID: purchaseIntentID,
-                    amount: amount
+            guard let amountOrderID, let lineItemID = selection.lineItemID else {
+                throw PaymentSheetError.invalidConfiguration(
+                    "The editable Order line item is missing."
                 )
             }
+            let session = try await adapter.updateAmount(
+                orderID: amountOrderID,
+                lineItemID: lineItemID,
+                amount: amount
+            )
             guard session.expiresAt > Date() else {
                 throw PaymentSheetError.checkoutExpired
             }
-            amountOrderID = session.id
             selectedPaymentMethodID = session.paymentMethods.first?.id
             state = .ready(session)
-            lifecycle.emit(
-                .orderPrepared,
-                order: CheckoutOrder(session: session, status: .requiresPayment)
-            )
             emitChangeIfNeeded()
         } catch {
             state = .amountSelection(
@@ -360,6 +502,70 @@ final class PaymentSheetViewModel: ObservableObject {
     }
 
     func pay() async -> PaymentSheetResult? {
+        if case let .purchasePayment(intent, purchaseSelection, false, _) = state {
+            guard let paymentSelection = mobileMoneySelection() else { return nil }
+            state = .purchasePayment(
+                intent,
+                purchaseSelection,
+                isProcessing: true,
+                failure: nil
+            )
+            telemetry.emit(.paymentAttemptStarted)
+            do {
+                let result = try await adapter.payPurchaseIntent(
+                    purchaseIntentID: intent.id,
+                    purchaseSelection: purchaseSelection,
+                    paymentSelection: paymentSelection
+                )
+                amountOrderID = result.session.id
+                selectedPaymentMethodID = result.session.paymentMethods.first?.id
+                let order = CheckoutOrder(
+                    session: result.session,
+                    status: .requiresPayment
+                )
+                lifecycle.emit(.orderPrepared, order: order)
+                lifecycle.emit(.paymentAttemptStarted, order: order)
+                if let failure = result.failure {
+                    inlineFailure = failure
+                    state = .ready(result.session)
+                    telemetry.emit(
+                        .paymentAttemptFailed,
+                        errorType: PaymentSheetTelemetry.safeErrorType(failure.code)
+                    )
+                    lifecycle.emit(
+                        .paymentAttemptFailed,
+                        order: order,
+                        failure: failure.checkoutFailure(recoverable: true)
+                    )
+                    return nil
+                }
+                guard let outcome = result.outcome else {
+                    throw PaymentSheetRequestError(
+                        code: "invalid_checkout_response",
+                        message: "Inttegro returned an invalid checkout response."
+                    )
+                }
+                return handle(outcome, session: result.session)
+            } catch {
+                let failure = Self.failure(from: error)
+                state = .purchasePayment(
+                    intent,
+                    purchaseSelection,
+                    isProcessing: false,
+                    failure: failure
+                )
+                telemetry.emit(
+                    .paymentAttemptFailed,
+                    errorType: PaymentSheetTelemetry.safeErrorType(failure.code)
+                )
+                lifecycle.emit(
+                    .paymentAttemptFailed,
+                    failure: failure.checkoutFailure(recoverable: true)
+                )
+                return nil
+            }
+        }
+
         guard case let .ready(session) = state,
               let selection = paymentSelection(in: session) else {
             return nil
@@ -487,6 +693,12 @@ final class PaymentSheetViewModel: ObservableObject {
             return .saved(method)
         }
 
+        return mobileMoneySelection()
+    }
+
+    private func mobileMoneySelection() -> PaymentSheetPaymentSelection? {
+        validationMessages = [:]
+
         let account = mobileMoneyAccountNumber.trimmingCharacters(in: .whitespacesAndNewlines)
         let digitCount = account.filter(\.isNumber).count
         if digitCount != 10 {
@@ -560,6 +772,17 @@ final class PaymentSheetViewModel: ObservableObject {
         }
     }
 
+    private func initializeSelectedAmount(
+        for product: PaymentSheetPurchaseIntent.Product?
+    ) {
+        guard let selection = product?.amountSelection else {
+            selectedAmountValue = 0
+            return
+        }
+        selectedAmountValue = selection.suggestions.first(where: \.recommended)?.value
+            ?? selection.minimum
+    }
+
     private func emitChangeIfNeeded() {
         let complete: Bool
         let paymentMethod: String?
@@ -567,6 +790,12 @@ final class PaymentSheetViewModel: ObservableObject {
         case .amountSelection:
             complete = canSelectAmount
             paymentMethod = nil
+        case .purchaseIntent:
+            complete = canContinuePurchaseIntent
+            paymentMethod = nil
+        case .purchasePayment:
+            complete = canPay
+            paymentMethod = "mobile_money"
         case .ready:
             complete = canPay
             paymentMethod = selectedMethod?.kind == .mobileMoney
@@ -672,7 +901,7 @@ final class PaymentSheetViewModel: ObservableObject {
             .paid
         case .ready:
             .requiresPayment
-        case .loading, .amountSelection, .failed:
+        case .loading, .amountSelection, .purchaseIntent, .purchasePayment, .failed:
             .requiresPayment
         }
         return CheckoutOrder(session: session, status: status)

@@ -4,31 +4,24 @@ import Testing
 
 @Suite("Checkout payment sheet adapter")
 struct CheckoutPaymentSheetAdapterTests {
-    @Test("Maps and finalizes a customer-selected amount")
-    func mapsCustomerSelectedAmount() async throws {
+    @Test("Loads Buy-link choices before paying the selected product")
+    func loadsThenPaysFixedPricePurchaseIntent() async throws {
         let transport = StubTransport(responses: [
             "/checkout/lookup": """
             {
               "purchase_intent": {
-                "id": "sale_test",
+                "id": "sale_fixed",
                 "merchant": {"app_name": "Field & Form"},
-                "product": {"id": "prod_test", "name": "Community garden"},
+                "quantity": {"min": 1, "max": 4},
+                "product": {"id": "prod_fixed", "name": "Woven basket"},
                 "price": {
-                  "id": "pr_test",
-                  "type": "customer_selected_amount",
-                  "customer_selected_amount": {
-                    "currency": "ghs",
-                    "minimum": 500,
-                    "maximum": 5000,
-                    "suggested_amounts": [
-                      {"id": "recommended", "value": 1000, "recommended": true}
-                    ]
-                  }
+                  "type": "fixed_amount",
+                  "nominal": {"value": 1250, "currency": "ghs"}
                 }
               }
             }
             """,
-            "/checkout/select_amount": """
+            "/checkout/pay": """
             {
               "order": {
                 "id": "or_test",
@@ -46,18 +39,108 @@ struct CheckoutPaymentSheetAdapterTests {
         ])
         let adapter = makeAdapter(transport)
 
-        let selection = try await adapter.retrieveAmountSelection(
+        let intent = try await adapter.retrievePurchaseIntent(
+            purchaseIntentID: "sale_fixed"
+        )
+
+        #expect(intent.products.first?.fixedAmount?.value == 1_250)
+        #expect(intent.maximumQuantity == 4)
+        #expect(await transport.request(for: "/checkout/pay") == nil)
+
+        let result = try await adapter.payPurchaseIntent(
+            purchaseIntentID: "sale_fixed",
+            purchaseSelection: .init(
+                productID: "prod_fixed",
+                quantity: 2,
+                customer: .init(name: "Ama Mensah", emailAddress: "ama@example.com")
+            ),
+            paymentSelection: .mobileMoney(.init(
+                network: .mtn,
+                accountNumber: "0244000042"
+            ))
+        )
+
+        #expect(result.session.id == "or_test")
+        #expect(result.outcome == .pending(nil))
+        let request = try #require(await transport.request(for: "/checkout/pay"))
+        let body = try #require(request.httpBody)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(json["purchase_intent_id"] as? String == "sale_fixed")
+        #expect(json["variant_product_id"] as? String == "prod_fixed")
+        #expect(json["quantity"] as? Int == 2)
+        let customer = try #require(json["customer_data"] as? [String: String])
+        #expect(customer["name"] == "Ama Mensah")
+        #expect(customer["email_address"] == "ama@example.com")
+        #expect(json["payment_method_data"] != nil)
+        #expect(request.value(forHTTPHeaderField: "Idempotency-Key") != nil)
+    }
+
+    @Test("Maps and pays a customer-selected amount")
+    func mapsCustomerSelectedAmount() async throws {
+        let transport = StubTransport(responses: [
+            "/checkout/lookup": """
+            {
+              "purchase_intent": {
+                "id": "sale_test",
+                "merchant": {"app_name": "Field & Form"},
+                "quantity": {"min": 1},
+                "product": {"id": "prod_test", "name": "Community garden"},
+                "price": {
+                  "id": "pr_test",
+                  "type": "customer_selected_amount",
+                  "customer_selected_amount": {
+                    "currency": "ghs",
+                    "minimum": 500,
+                    "maximum": 5000,
+                    "suggested_amounts": [
+                      {"id": "recommended", "value": 1000, "recommended": true}
+                    ]
+                  }
+                }
+              }
+            }
+            """,
+            "/checkout/pay": """
+            {
+              "order": {
+                "id": "or_test",
+                "status": "requires_payment",
+                "expires_at": "2030-01-02T03:04:05Z",
+                "payment": {
+                  "status": "initiated",
+                  "amount": {"value": 1250, "currency": "ghs"},
+                  "payment_method_types": ["mobile_money"]
+                },
+                "invoice": {"beneficiary": {"name": "Field & Form"}}
+              }
+            }
+            """,
+        ])
+        let adapter = makeAdapter(transport)
+
+        let intent = try await adapter.retrievePurchaseIntent(
             purchaseIntentID: "sale_test"
         )
-        let session = try await adapter.selectAmount(
+        let product = try #require(intent.products.first)
+        let selection = try #require(product.amountSelection)
+        let result = try await adapter.payPurchaseIntent(
             purchaseIntentID: "sale_test",
-            amount: .init(value: 1_250, currency: "GHS")
+            purchaseSelection: .init(
+                productID: product.id,
+                quantity: 1,
+                selectedAmount: .init(value: 1_250, currency: "GHS"),
+                customer: .init(name: "Ama Mensah", phoneNumber: "0244000042")
+            ),
+            paymentSelection: .mobileMoney(.init(
+                network: .mtn,
+                accountNumber: "0244000042"
+            ))
         )
 
         #expect(selection.minimum == 500)
         #expect(selection.suggestions.first?.value == 1_000)
-        #expect(session.id == "or_test")
-        let request = try #require(await transport.request(for: "/checkout/select_amount"))
+        #expect(result.session.id == "or_test")
+        let request = try #require(await transport.request(for: "/checkout/pay"))
         let body = try #require(request.httpBody)
         let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
         #expect(json["purchase_intent_id"] as? String == "sale_test")
@@ -65,6 +148,57 @@ struct CheckoutPaymentSheetAdapterTests {
         #expect(amount["currency"] as? String == "ghs")
         #expect(amount["value"] as? Int == 1_250)
         #expect(request.value(forHTTPHeaderField: "Idempotency-Key") != nil)
+    }
+
+    @Test("Returns the created Order when Purchase Intent payment fails")
+    func returnsCreatedOrderOnPurchasePaymentFailure() async throws {
+        let transport = SequencedStubTransport(responses: [
+            .init(
+                statusCode: 402,
+                body: """
+                {
+                  "order": {
+                    "id": "or_retry",
+                    "status": "requires_payment",
+                    "expires_at": "2030-01-02T03:04:05Z",
+                    "payment": {
+                      "status": "failed",
+                      "amount": {"value": 1250, "currency": "ghs"},
+                      "payment_method_types": ["mobile_money"]
+                    },
+                    "invoice": {"beneficiary": {"name": "Field & Form"}}
+                  },
+                  "error": {
+                    "code": "payment_failed",
+                    "message": "The payment could not be completed."
+                  }
+                }
+                """,
+                headers: ["X-Request-Id": "req_failed_payment"]
+            ),
+        ])
+        let adapter = CheckoutPaymentSheetAdapter(
+            baseURL: URL(string: "https://example.test")!,
+            executeRequest: { request in try await transport.execute(request) }
+        )
+
+        let result = try await adapter.payPurchaseIntent(
+            purchaseIntentID: "sale_fixed",
+            purchaseSelection: .init(
+                productID: "prod_fixed",
+                quantity: 1,
+                customer: .init(name: "Ama Mensah")
+            ),
+            paymentSelection: .mobileMoney(.init(
+                network: .mtn,
+                accountNumber: "0244000042"
+            ))
+        )
+
+        #expect(result.session.id == "or_retry")
+        #expect(result.outcome == nil)
+        #expect(result.failure?.code == "payment_failed")
+        #expect(result.failure?.requestID == "req_failed_payment")
     }
 
     @Test("Updates the selected amount on the existing Order")
@@ -99,8 +233,10 @@ struct CheckoutPaymentSheetAdapterTests {
         let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
         #expect(json["purchase_intent_id"] == nil)
         #expect(json["order_id"] as? String == "or_test")
-        #expect(json["line_item_id"] as? String == "li_customer_selected")
-        let amount = try #require(json["selected_amount"] as? [String: Any])
+        let lineItems = try #require(json["line_items"] as? [[String: Any]])
+        let lineItem = try #require(lineItems.first)
+        #expect(lineItem["id"] as? String == "li_customer_selected")
+        let amount = try #require(lineItem["selected_amount"] as? [String: Any])
         #expect(amount["value"] as? Int == 2_500)
         #expect(request.value(forHTTPHeaderField: "Idempotency-Key") != nil)
     }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2 - 2026-10-17
+
+- Present fixed-price, customer-selected, and variant Buy-link choices natively.
+- Create the finalized Order and start payment together only when the payer
+  presses Pay with confirmed Buy-link and payment details.
+
 ## 0.4.1 - 2026-10-16
 
 - Align Swift with the canonical Checkout lifecycle shared by Inttegro's web

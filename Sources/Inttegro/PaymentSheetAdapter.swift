@@ -14,16 +14,17 @@ public protocol PaymentSheetAdapter: Sendable {
     /// - Returns: Current display and collection data for this presentation.
     func retrieveCheckout(orderID: String) async throws -> PaymentSheetSession
 
-    /// Loads the client-safe amount policy for a Purchase Intent.
-    func retrieveAmountSelection(
+    /// Loads the client-safe Buy-link product choices before Order creation.
+    func retrievePurchaseIntent(
         purchaseIntentID: String
-    ) async throws -> PaymentSheetAmountSelection
+    ) async throws -> PaymentSheetPurchaseIntent
 
-    /// Creates the finalized Order for a valid selected amount.
-    func selectAmount(
+    /// Creates the Order and starts payment from the payer-confirmed Buy-link values.
+    func payPurchaseIntent(
         purchaseIntentID: String,
-        amount: PaymentSheetSession.Money
-    ) async throws -> PaymentSheetSession
+        purchaseSelection: PaymentSheetPurchaseSelection,
+        paymentSelection: PaymentSheetPaymentSelection
+    ) async throws -> PaymentSheetPurchasePaymentResult
 
     /// Updates the amount on the same finalized Order before payment starts.
     func updateAmount(
@@ -63,16 +64,17 @@ public protocol PaymentSheetAdapter: Sendable {
 }
 
 public extension PaymentSheetAdapter {
-    func retrieveAmountSelection(
+    func retrievePurchaseIntent(
         purchaseIntentID _: String
-    ) async throws -> PaymentSheetAmountSelection {
+    ) async throws -> PaymentSheetPurchaseIntent {
         throw PaymentSheetError.checkoutUnavailable
     }
 
-    func selectAmount(
+    func payPurchaseIntent(
         purchaseIntentID _: String,
-        amount _: PaymentSheetSession.Money
-    ) async throws -> PaymentSheetSession {
+        purchaseSelection _: PaymentSheetPurchaseSelection,
+        paymentSelection _: PaymentSheetPaymentSelection
+    ) async throws -> PaymentSheetPurchasePaymentResult {
         throw PaymentSheetError.checkoutUnavailable
     }
 

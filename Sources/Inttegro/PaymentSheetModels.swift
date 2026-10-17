@@ -2,11 +2,12 @@ import Foundation
 
 /// Everything Inttegro needs to prepare one native Checkout presentation.
 ///
-/// Create this value with either a finalized Order ID or a public Purchase
-/// Intent backed by a customer-selected amount price. The SDK intentionally
+/// Create this value with either a finalized Order ID or a public Buy link
+/// backed by a Purchase Intent. The SDK intentionally
 /// does not accept a merchant API key or merchant-supplied display terms:
-/// Checkout remains authoritative for currency, range, merchant identity, and
-/// the finalized Order.
+/// Checkout remains authoritative for pricing, merchant identity, and the
+/// finalized Order. A Purchase Intent does not create its Order until the payer
+/// submits payment.
 ///
 /// Configuration is validated synchronously. Reuse it for retries of the same
 /// presentation, and create a new value when its Checkout reference or
@@ -156,7 +157,7 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
 
     /// Public identifier of the finalized Order to retrieve through Checkout.
     public let orderID: String?
-    /// Public Purchase Intent whose amount the payer must choose before payment.
+    /// Public Buy link that Checkout presents before creating its Order.
     public let purchaseIntentID: String?
     /// Application URL used when a provider returns control to the merchant app.
     public let returnURL: URL?
@@ -205,11 +206,11 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
         self.features = features
     }
 
-    /// Creates a payment sheet that begins with customer-selected amount entry.
+    /// Creates a payment sheet that begins with the Buy link's product choices.
     ///
-    /// Checkout loads the allowed currency and range from the Purchase Intent.
-    /// After the payer chooses an amount, Inttegro creates the finalized Order
-    /// idempotently and continues through the ordinary native payment flow.
+    /// Checkout loads the authoritative product, price, variants, and quantity
+    /// range. Inttegro creates the finalized Order only after the payer confirms
+    /// those choices and supplies their identifying details.
     public init(
         purchaseIntentID: String,
         returnURL: URL? = nil,
@@ -281,9 +282,112 @@ public struct PaymentSheetConfiguration: Sendable, Equatable {
     }
 }
 
+/// Client-safe Buy-link data shown before Checkout creates an Order.
+public struct PaymentSheetPurchaseIntent: Sendable, Equatable {
+    /// One selectable product or variant in the offer.
+    public struct Product: Sendable, Equatable, Identifiable {
+        public let id: String
+        public let name: String
+        public let about: String?
+        public let variantValues: [String: String]
+        public let fixedAmount: PaymentSheetSession.Money?
+        public let amountSelection: PaymentSheetAmountSelection?
+
+        public init(
+            id: String,
+            name: String,
+            about: String? = nil,
+            variantValues: [String: String] = [:],
+            fixedAmount: PaymentSheetSession.Money? = nil,
+            amountSelection: PaymentSheetAmountSelection? = nil
+        ) {
+            self.id = id
+            self.name = name
+            self.about = about
+            self.variantValues = variantValues
+            self.fixedAmount = fixedAmount
+            self.amountSelection = amountSelection
+        }
+    }
+
+    /// One merchant-authored variant dimension, such as color or size.
+    public struct VariantAxis: Sendable, Equatable, Identifiable {
+        public let key: String
+        public let label: String
+        public var id: String { key }
+
+        public init(key: String, label: String) {
+            self.key = key
+            self.label = label
+        }
+    }
+
+    public let id: String
+    public let merchantName: String
+    public let products: [Product]
+    public let defaultProductID: String
+    public let variantAxes: [VariantAxis]
+    public let minimumQuantity: Int
+    public let maximumQuantity: Int?
+    public let expiresAt: Date?
+
+    public init(
+        id: String,
+        merchantName: String,
+        products: [Product],
+        defaultProductID: String,
+        variantAxes: [VariantAxis] = [],
+        minimumQuantity: Int = 1,
+        maximumQuantity: Int? = nil,
+        expiresAt: Date? = nil
+    ) {
+        self.id = id
+        self.merchantName = merchantName
+        self.products = products
+        self.defaultProductID = defaultProductID
+        self.variantAxes = variantAxes
+        self.minimumQuantity = max(1, minimumQuantity)
+        self.maximumQuantity = maximumQuantity
+        self.expiresAt = expiresAt
+    }
+}
+
+/// Payer-confirmed Buy-link values submitted when Checkout creates the Order.
+public struct PaymentSheetPurchaseSelection: Sendable, Equatable {
+    public struct Customer: Sendable, Equatable {
+        public let name: String
+        public let emailAddress: String?
+        public let phoneNumber: String?
+
+        public init(name: String, emailAddress: String? = nil, phoneNumber: String? = nil) {
+            self.name = name
+            self.emailAddress = emailAddress
+            self.phoneNumber = phoneNumber
+        }
+    }
+
+    public let productID: String
+    public let quantity: Int
+    public let selectedAmount: PaymentSheetSession.Money?
+    public let customer: Customer
+
+    public init(
+        productID: String,
+        quantity: Int,
+        selectedAmount: PaymentSheetSession.Money? = nil,
+        customer: Customer
+    ) {
+        self.productID = productID
+        self.quantity = quantity
+        self.selectedAmount = selectedAmount
+        self.customer = customer
+    }
+}
+
 /// Client-safe policy for creating or editing a customer-selected checkout.
 ///
-/// ``purchaseIntentID`` is present while creating an Order from a Buy link;
+/// ``purchaseIntentID`` is present while collecting Buy-link choices for the
+/// later atomic Order-and-payment request;
 /// ``orderID`` is present while changing a still-pristine existing Order.
 public struct PaymentSheetAmountSelection: Sendable, Equatable {
     /// One convenient amount suggested by the merchant.
@@ -827,6 +931,27 @@ public enum PaymentSheetPaymentOutcome: Sendable, Equatable {
     case requiresConfirmation(PaymentSheetConfirmationChallenge)
     /// Provider authorization or asynchronous processing is still outstanding.
     case pending(PaymentSheetExternalAction?)
+}
+
+/// Result of paying a Purchase Intent after Checkout creates its Order.
+public struct PaymentSheetPurchasePaymentResult: Sendable, Equatable {
+    public let session: PaymentSheetSession
+    public let outcome: PaymentSheetPaymentOutcome?
+    public let failure: PaymentSheetFailure?
+
+    public init(
+        session: PaymentSheetSession,
+        outcome: PaymentSheetPaymentOutcome? = nil,
+        failure: PaymentSheetFailure? = nil
+    ) {
+        precondition(
+            (outcome == nil) != (failure == nil),
+            "Provide exactly one of outcome or failure"
+        )
+        self.session = session
+        self.outcome = outcome
+        self.failure = failure
+    }
 }
 
 /// Terminal result of one native payment-sheet presentation.

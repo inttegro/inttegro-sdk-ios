@@ -65,9 +65,6 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
             path: "checkout/lookup",
             body: ["order_id": orderID]
         )
-        if let error = envelope.error {
-            throw error.checkoutError(metadata: envelope.metadata)
-        }
         guard let order = envelope.order else {
             throw PaymentSheetRequestError(
                 code: "invalid_checkout_response",
@@ -79,10 +76,10 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
         return try order.paymentSheetSession
     }
 
-    /// Retrieves the client-safe range for a customer-selected amount.
-    public func retrieveAmountSelection(
+    /// Retrieves the client-safe Buy-link product choices.
+    public func retrievePurchaseIntent(
         purchaseIntentID: String
-    ) async throws -> PaymentSheetAmountSelection {
+    ) async throws -> PaymentSheetPurchaseIntent {
         let envelope = try await post(
             path: "checkout/lookup",
             body: ["purchase_intent_id": purchaseIntentID]
@@ -98,42 +95,82 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
                 retryAfterSeconds: envelope.metadata.retryAfterSeconds
             )
         }
-        return try purchaseIntent.paymentSheetAmountSelection
+        return try purchaseIntent.paymentSheetPurchaseIntent
     }
 
-    /// Creates the finalized Order for a payer-selected amount.
-    public func selectAmount(
+    /// Creates the Order and starts payment only when the payer presses Pay.
+    public func payPurchaseIntent(
         purchaseIntentID: String,
-        amount: PaymentSheetSession.Money
-    ) async throws -> PaymentSheetSession {
-        let fingerprint = "\(purchaseIntentID)#\(amount.currency)#\(amount.value)"
+        purchaseSelection: PaymentSheetPurchaseSelection,
+        paymentSelection: PaymentSheetPaymentSelection
+    ) async throws -> PaymentSheetPurchasePaymentResult {
+        let payment = paymentRequest(
+            referenceName: "purchase_intent_id",
+            referenceID: purchaseIntentID,
+            selection: paymentSelection
+        )
+        let fingerprint = [
+            payment.fingerprint,
+            purchaseIntentID,
+            purchaseSelection.productID,
+            String(purchaseSelection.quantity),
+            purchaseSelection.selectedAmount?.currency ?? "",
+            purchaseSelection.selectedAmount.map { String($0.value) } ?? "",
+            purchaseSelection.customer.name,
+            purchaseSelection.customer.emailAddress ?? "",
+            purchaseSelection.customer.phoneNumber ?? "",
+        ].joined(separator: "#")
         let idempotencyKey = await attemptKeys.key(
-            operation: "select_amount",
+            operation: "pay",
             fingerprint: fingerprint
         )
+        var body = payment.body
+        body["variant_product_id"] = purchaseSelection.productID
+        body["quantity"] = purchaseSelection.quantity
+        body["customer_data"] = [
+            "name": purchaseSelection.customer.name,
+            "email_address": purchaseSelection.customer.emailAddress as Any,
+            "phone_number": purchaseSelection.customer.phoneNumber as Any,
+        ].compactMapValues { value in
+            if let value = value as? String, !value.isEmpty { return value }
+            return nil
+        }
+        if let amount = purchaseSelection.selectedAmount {
+            body["selected_amount"] = [
+                "currency": amount.currency.lowercased(),
+                "value": amount.value,
+            ]
+        }
         let envelope = try await post(
-            path: "checkout/select_amount",
-            body: [
-                "purchase_intent_id": purchaseIntentID,
-                "selected_amount": [
-                    "currency": amount.currency.lowercased(),
-                    "value": amount.value,
-                ],
-            ],
+            path: "checkout/pay",
+            body: body,
             idempotencyKey: idempotencyKey
         )
-        if let error = envelope.error {
-            throw error.checkoutError(metadata: envelope.metadata)
-        }
         guard let order = envelope.order else {
             throw PaymentSheetRequestError(
                 code: "invalid_checkout_response",
-                message: "Inttegro did not return the prepared checkout Order.",
+                message: "Inttegro did not return the checkout Order.",
                 requestID: envelope.metadata.requestID,
                 retryAfterSeconds: envelope.metadata.retryAfterSeconds
             )
         }
-        return try order.paymentSheetSession
+        let session = try order.paymentSheetSession
+        if let error = envelope.error {
+            let requestError = error.checkoutError(metadata: envelope.metadata)
+            return PaymentSheetPurchasePaymentResult(
+                session: session,
+                failure: PaymentSheetFailure(
+                    code: requestError.code,
+                    message: requestError.message,
+                    requestID: requestError.requestID,
+                    retryAfterSeconds: requestError.retryAfterSeconds
+                )
+            )
+        }
+        return PaymentSheetPurchasePaymentResult(
+            session: session,
+            outcome: try paymentOutcome(from: envelope)
+        )
     }
 
     /// Updates a payer-selected amount while the Checkout Order is still pristine.
@@ -151,11 +188,13 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
             path: "checkout/select_amount",
             body: [
                 "order_id": orderID,
-                "line_item_id": lineItemID,
-                "selected_amount": [
-                    "currency": amount.currency.lowercased(),
-                    "value": amount.value,
-                ],
+                "line_items": [[
+                    "id": lineItemID,
+                    "selected_amount": [
+                        "currency": amount.currency.lowercased(),
+                        "value": amount.value,
+                    ],
+                ]],
             ],
             idempotencyKey: idempotencyKey
         )
@@ -181,7 +220,11 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
         session: PaymentSheetSession,
         selection: PaymentSheetPaymentSelection
     ) async throws -> PaymentSheetPaymentOutcome {
-        let request = paymentRequest(orderID: session.id, selection: selection)
+        let request = paymentRequest(
+            referenceName: "order_id",
+            referenceID: session.id,
+            selection: selection
+        )
         let idempotencyKey = await attemptKeys.key(
             operation: "pay",
             fingerprint: request.fingerprint
@@ -296,17 +339,18 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
     }
 
     private func paymentRequest(
-        orderID: String,
+        referenceName: String,
+        referenceID: String,
         selection: PaymentSheetPaymentSelection
     ) -> (body: [String: Any], fingerprint: String) {
         switch selection {
         case let .saved(method):
             return (
                 [
-                    "order_id": orderID,
+                    referenceName: referenceID,
                     "payment_method_id": method.id,
                 ],
-                "\(orderID)#saved#\(method.id)"
+                "\(referenceID)#saved#\(method.id)"
             )
         case let .mobileMoney(input):
             var methodData: [String: Any] = [
@@ -317,7 +361,7 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
                 ],
             ]
             var fingerprintParts = [
-                orderID,
+                referenceID,
                 "mobile_money",
                 input.network.rawValue,
                 input.accountNumber,
@@ -350,7 +394,7 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
             }
             return (
                 [
-                    "order_id": orderID,
+                    referenceName: referenceID,
                     "payment_method_data": methodData,
                     "save_payment_method": input.savePaymentMethod,
                 ],
@@ -371,7 +415,7 @@ public struct CheckoutPaymentSheetAdapter: PaymentSheetAdapter {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("inttegro-sdk-ios/0.4.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("inttegro-sdk-ios/0.4.2", forHTTPHeaderField: "User-Agent")
         telemetry?.applyTraceContext(to: &request)
         if let idempotencyKey {
             request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key")
@@ -511,10 +555,13 @@ private struct CheckoutPurchaseIntent: Decodable {
     let merchant: Merchant?
     let product: Product?
     let price: Price?
+    let quantity: Quantity
+    let variantSet: VariantSet?
     let expiresAt: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, merchant, product, price
+        case id, merchant, product, price, quantity
+        case variantSet = "variant_set"
         case expiresAt = "expires_at"
     }
 
@@ -538,11 +585,50 @@ private struct CheckoutPurchaseIntent: Decodable {
     struct Price: Decodable {
         let id: String?
         let type: String
+        let nominal: CheckoutOrderResponse.Money?
         let customerSelectedAmount: CustomerSelectedAmount?
 
         enum CodingKeys: String, CodingKey {
-            case id, type
+            case id, type, nominal
             case customerSelectedAmount = "customer_selected_amount"
+        }
+    }
+
+    struct Quantity: Decodable {
+        let min: Int
+        let max: Int?
+    }
+
+    struct VariantSet: Decodable {
+        let defaultProductID: String?
+        let variantAxes: [VariantAxis]
+        let variants: [Variant]
+
+        enum CodingKeys: String, CodingKey {
+            case variants
+            case defaultProductID = "default_product_id"
+            case variantAxes = "variant_axes"
+        }
+
+        struct VariantAxis: Decodable {
+            let key: String
+            let label: String
+            let position: Int
+        }
+
+        struct Variant: Decodable {
+            let active: Bool
+            let position: Int?
+            let productID: String
+            let product: Product?
+            let price: Price?
+            let variantValues: [String: String]
+
+            enum CodingKeys: String, CodingKey {
+                case active, position, product, price
+                case productID = "product_id"
+                case variantValues = "variant_values"
+            }
         }
     }
 
@@ -593,6 +679,98 @@ private struct CheckoutPurchaseIntent: Decodable {
                 expiresAt: CheckoutOrderResponse.date(from: expiresAt)
             )
         }
+    }
+
+    var paymentSheetPurchaseIntent: PaymentSheetPurchaseIntent {
+        get throws {
+            guard let product, let price else {
+                throw PaymentSheetRequestError(
+                    code: "invalid_checkout_response",
+                    message: "The Purchase Intent does not include a product and price."
+                )
+            }
+            let merchantName = merchant?.appName?.nonEmpty
+                ?? merchant?.organizationName?.nonEmpty
+                ?? "Inttegro merchant"
+            let primary = try paymentSheetProduct(
+                product: product,
+                price: price,
+                variantValues: [:],
+                merchantName: merchantName
+            )
+            let variants = try variantSet?.variants
+                .filter(\.active)
+                .sorted { ($0.position ?? .max) < ($1.position ?? .max) }
+                .compactMap { variant -> PaymentSheetPurchaseIntent.Product? in
+                    guard let product = variant.product, let price = variant.price else {
+                        return nil
+                    }
+                    return try paymentSheetProduct(
+                        product: product,
+                        price: price,
+                        variantValues: variant.variantValues,
+                        merchantName: merchantName
+                    )
+                } ?? []
+            let products = variants.isEmpty ? [primary] : variants
+            return PaymentSheetPurchaseIntent(
+                id: id,
+                merchantName: merchantName,
+                products: products,
+                defaultProductID: products.contains(where: { $0.id == product.id })
+                    ? product.id
+                    : (variantSet?.defaultProductID ?? products[0].id),
+                variantAxes: variantSet?.variantAxes
+                    .sorted { $0.position < $1.position }
+                    .map { .init(key: $0.key, label: $0.label) } ?? [],
+                minimumQuantity: quantity.min,
+                maximumQuantity: quantity.max,
+                expiresAt: CheckoutOrderResponse.date(from: expiresAt)
+            )
+        }
+    }
+
+    private func paymentSheetProduct(
+        product: Product,
+        price: Price,
+        variantValues: [String: String],
+        merchantName: String
+    ) throws -> PaymentSheetPurchaseIntent.Product {
+        let amountSelection: PaymentSheetAmountSelection?
+        if let policy = price.customerSelectedAmount {
+            amountSelection = .init(
+                purchaseIntentID: id,
+                merchantName: merchantName,
+                productName: product.name,
+                productAbout: product.about?.nonEmpty ?? product.description?.nonEmpty,
+                currency: policy.currency,
+                minimum: policy.minimum,
+                maximum: policy.maximum,
+                suggestions: policy.suggestedAmounts?.map {
+                    .init(id: $0.id, value: $0.value, recommended: $0.recommended == true)
+                } ?? [],
+                expiresAt: CheckoutOrderResponse.date(from: expiresAt)
+            )
+        } else {
+            amountSelection = nil
+        }
+        let fixedAmount = price.nominal.map {
+            PaymentSheetSession.Money(value: $0.value, currency: $0.currency)
+        }
+        guard fixedAmount != nil || amountSelection != nil else {
+            throw PaymentSheetRequestError(
+                code: "invalid_checkout_response",
+                message: "The Purchase Intent includes an unsupported price."
+            )
+        }
+        return .init(
+            id: product.id,
+            name: product.name,
+            about: product.about?.nonEmpty ?? product.description?.nonEmpty,
+            variantValues: variantValues,
+            fixedAmount: fixedAmount,
+            amountSelection: amountSelection
+        )
     }
 }
 
